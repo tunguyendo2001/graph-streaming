@@ -1,0 +1,17 @@
+services:
+  memgraph-platform:
+    image: memgraph/memgraph-platform:latest
+    container_name: memgraph-platform
+    ports:
+      - "7687:7687" # Bolt protocol: Python neo4j driver kết nối vào đây
+      - "7444:7444" # Log endpoint để Memgraph Lab đọc log
+      - "3000:3000" # Memgraph Lab UI
+    volumes:
+      - mg_lib:/var/lib/memgraph
+      - mg_log:/var/log/memgraph
+      - mg_etc:/etc/memgraph
+
+volumes:
+  mg_lib:
+  mg_log:
+  mg_etc:
