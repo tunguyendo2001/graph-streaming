@@ -26,7 +26,7 @@ class FrozenDict(dict):
     def _blocked(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError("FrozenDict does not support mutation")
 
-    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _blocked
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _blocked
 
 
 def _freeze(value: Any) -> Any:

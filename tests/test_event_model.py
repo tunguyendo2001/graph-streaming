@@ -5,6 +5,29 @@ from event_model import Event, parse_cert_row
 
 
 class EventModelTest(unittest.TestCase):
+    def test_properties_alias_rejects_inplace_union(self):
+        event = parse_cert_row(
+            "file",
+            {
+                "id": "{F1}",
+                "date": "08/12/2010 14:54:16",
+                "user": "BBS0039",
+                "pc": "PC-9436",
+                "filename": "GGX5KL22.exe",
+                "content": "must be discarded",
+            },
+        )
+
+        props = event.properties
+
+        with self.assertRaises(TypeError):
+            props |= {"x": 1}
+
+        self.assertEqual(
+            event.properties,
+            {"filename": "GGX5KL22.exe", "extension": ".exe"},
+        )
+
     def test_from_record_round_trips_aware_iso_datetime_as_utc_event_ts(self):
         event = Event.from_record(
             {
