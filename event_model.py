@@ -14,6 +14,49 @@ LEAK_TERMS = ("wikileaks", "pastebin")
 CLOUD_TERMS = ("dropbox", "drive.google", "box.com", "onedrive")
 
 
+class FrozenList(list):
+    def _blocked(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("FrozenList does not support mutation")
+
+    append = extend = insert = remove = pop = clear = sort = reverse = _blocked
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _blocked
+
+
+class FrozenDict(dict):
+    def _blocked(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("FrozenDict does not support mutation")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _blocked
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, (FrozenDict, FrozenList)):
+        return value
+    if isinstance(value, dict):
+        return FrozenDict({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return FrozenList(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _clone(value: Any) -> Any:
+    if isinstance(value, (FrozenDict, dict)):
+        return {key: _clone(item) for key, item in value.items()}
+    if isinstance(value, (FrozenList, list)):
+        return [_clone(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone(item) for item in value)
+    return value
+
+
+def _parse_record_event_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value)
+
+
 @dataclass(frozen=True)
 class Event:
     event_id: str
@@ -24,9 +67,16 @@ class Event:
     machine_id: str
     properties: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "properties", _freeze(_clone(self.properties)))
+
     @property
     def event_ts(self) -> int:
-        return int(self.event_time.replace(tzinfo=timezone.utc).timestamp())
+        if self.event_time.tzinfo is None:
+            event_time = self.event_time.replace(tzinfo=timezone.utc)
+        else:
+            event_time = self.event_time.astimezone(timezone.utc)
+        return int(event_time.timestamp())
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -37,14 +87,12 @@ class Event:
             "event_ts": self.event_ts,
             "user_id": self.user_id,
             "machine_id": self.machine_id,
-            "properties": dict(self.properties),
+            "properties": _clone(self.properties),
         }
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "Event":
-        event_time = record["event_time"]
-        if not isinstance(event_time, datetime):
-            event_time = datetime.fromisoformat(event_time)
+        event_time = _parse_record_event_time(record["event_time"])
         return cls(
             event_id=record["event_id"],
             source=record["source"],
@@ -52,7 +100,7 @@ class Event:
             event_time=event_time,
             user_id=record["user_id"],
             machine_id=record["machine_id"],
-            properties=dict(record.get("properties", {})),
+            properties=_freeze(_clone(record.get("properties", {}))),
         )
 
 
