@@ -1,0 +1,14 @@
+artifacts/
+dead-letter/
+*.jsonl
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.worktrees/
+
+# Dataset gốc CERT khá lớn; giữ local để chạy assignment, tránh commit nhầm.
+data/
+
+# File stream sạch có thể tạo lại từ script tiền xử lý.
+clean_cert_stream.csv

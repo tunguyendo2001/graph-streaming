@@ -1,0 +1,9 @@
+services:
+  memgraph:
+    image: memgraph/memgraph-platform:latest
+    ports:
+      - "7687:7687"
+      - "3000:3000"
+      - "7444:7444"
+    environment:
+      - MEMGRAPH_MEMORY_LIMIT=4000

@@ -1,0 +1,2 @@
+id,date,user,pc,to,cc,bcc,from,size,attachments,content
+E1,01/01/2010 08:00:00,INSIDER1,PC-1,a@test.com,,,,0,0,hello
