@@ -61,6 +61,26 @@ class CohortSelectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"insiders\.csv row 2.*missing required values: end"):
                 load_incidents(path)
 
+    def test_load_incidents_rejects_empty_or_whitespace_required_values_with_field_context(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "insiders.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "dataset,scenario,details,user,start,end",
+                        "4.2,1,r4.2-1-INSIDER1.csv,   ,  ,01/05/2010 18:00:00",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"insiders\.csv row 2.*missing required values: start, user|insiders\.csv row 2.*missing required values: user, start",
+            ):
+                load_incidents(path)
+
     def test_build_activity_profiles_counts_from_fixtures(self):
         profiles = build_activity_profiles(FIXTURES)
 
@@ -97,6 +117,26 @@ class CohortSelectionTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, r"logon\.csv row 2.*extra columns"):
+                build_activity_profiles(temp_path)
+
+    def test_build_activity_profiles_rejects_empty_or_whitespace_required_values_with_field_context(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{L1},01/02/2010 07:30:00,,   ,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"logon\.csv row 2.*missing required values: pc, user|logon\.csv row 2.*missing required values: user, pc",
+            ):
                 build_activity_profiles(temp_path)
 
     def test_robust_standardize_handles_zero_mad_columns(self):

@@ -108,7 +108,7 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
         ("file.csv", {"date", "user", "pc", "filename", "content"}, _handle_file_row),
         (
             "email.csv",
-            {"date", "user", "pc", "to", "cc", "bcc", "from", "size", "attachments", "content"},
+            {"date", "user", "pc"},
             _handle_email_row,
         ),
     ):
@@ -299,12 +299,20 @@ def _validate_row(source_name, row_number, row, required_columns):
     if extras:
         raise ValueError(f"{source_name} row {row_number} has extra columns")
 
-    missing_values = sorted(column for column in required_columns if row.get(column) is None)
+    missing_values = sorted(column for column in required_columns if _is_missing_required_value(row.get(column)))
     if missing_values:
         raise ValueError(
             f"{source_name} row {row_number} missing required values: {', '.join(missing_values)}"
         )
     return row
+
+
+def _is_missing_required_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
 
 
 def _validate_profile_vectors(profile_vectors):
