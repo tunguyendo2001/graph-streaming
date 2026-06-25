@@ -119,6 +119,26 @@ class CohortSelectionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"logon\.csv row 2.*extra columns"):
                 build_activity_profiles(temp_path)
 
+    def test_build_activity_profiles_requires_official_cert_email_header(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "email.csv").write_text(
+                "\n".join(
+                    [
+                        "date,user,pc",
+                        "01/02/2010 07:45:00,INSIDER1,PC-1001",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"email\.csv missing required columns: .*attachments.*bcc.*cc.*content.*from.*id.*size.*to|email\.csv missing required columns: .*id.*to.*cc.*bcc.*from.*size.*attachments.*content",
+            ):
+                build_activity_profiles(temp_path)
+
     def test_build_activity_profiles_rejects_empty_or_whitespace_required_values_with_field_context(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

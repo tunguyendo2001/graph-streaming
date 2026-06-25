@@ -102,12 +102,28 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
     root = Path(input_dir)
     profiles: dict[str, ActivityProfile] = {}
 
-    for source_name, required_columns, handler in (
-        ("logon.csv", {"date", "user", "pc", "activity"}, _handle_logon_row),
-        ("device.csv", {"date", "user", "pc", "activity"}, _handle_device_row),
-        ("file.csv", {"date", "user", "pc", "filename", "content"}, _handle_file_row),
+    for source_name, expected_columns, required_nonblank_fields, handler in (
+        (
+            "logon.csv",
+            {"id", "date", "user", "pc", "activity"},
+            {"date", "user", "pc", "activity"},
+            _handle_logon_row,
+        ),
+        (
+            "device.csv",
+            {"id", "date", "user", "pc", "activity"},
+            {"date", "user", "pc", "activity"},
+            _handle_device_row,
+        ),
+        (
+            "file.csv",
+            {"id", "date", "user", "pc", "filename", "content"},
+            {"date", "user", "pc", "filename", "content"},
+            _handle_file_row,
+        ),
         (
             "email.csv",
+            {"id", "date", "user", "pc", "to", "cc", "bcc", "from", "size", "attachments", "content"},
             {"date", "user", "pc"},
             _handle_email_row,
         ),
@@ -117,9 +133,9 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
             continue
         with source_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
-            _require_columns(source_name, reader.fieldnames, required_columns)
+            _require_columns(source_name, reader.fieldnames, expected_columns)
             for row_number, row in enumerate(reader, start=2):
-                row = _validate_row(source_name, row_number, row, required_columns)
+                row = _validate_row(source_name, row_number, row, required_nonblank_fields)
                 handler(row, profiles)
 
     return profiles
