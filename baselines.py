@@ -6,7 +6,10 @@ from typing import Collection, Iterable, Mapping, Sequence
 
 
 def clip(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError("value must be finite")
+    return max(0.0, min(1.0, numeric))
 
 
 def robust_deviation(current: float, history: Sequence[float]) -> float:

@@ -23,6 +23,14 @@ class BaselineFormulaTest(unittest.TestCase):
         self.assertEqual(clip(0.4), 0.4)
         self.assertEqual(clip(1.25), 1.0)
 
+    def test_clip_rejects_non_finite_values(self):
+        with self.assertRaises(ValueError):
+            clip(float("nan"))
+        with self.assertRaises(ValueError):
+            clip(float("inf"))
+        with self.assertRaises(ValueError):
+            clip(float("-inf"))
+
     def test_robust_deviation_empty_history_returns_zero(self):
         self.assertEqual(robust_deviation(10, []), 0.0)
 
@@ -50,6 +58,12 @@ class BaselineFormulaTest(unittest.TestCase):
     def test_unseen_logon_hour_is_more_anomalous_than_common_hour(self):
         counts = {8: 20, 9: 10}
         self.assertGreater(logon_hour_anomaly(2, counts), logon_hour_anomaly(8, counts))
+
+    def test_logon_hour_anomaly_rejects_invalid_hour_bounds(self):
+        with self.assertRaises(ValueError):
+            logon_hour_anomaly(-1, {8: 20, 9: 10})
+        with self.assertRaises(ValueError):
+            logon_hour_anomaly(24, {8: 20, 9: 10})
 
     def test_new_usb_is_maximally_novel_without_history(self):
         self.assertEqual(usb_deviation(1, [], seen_before=False), 1.0)
@@ -145,6 +159,12 @@ class BaselineFormulaTest(unittest.TestCase):
     def test_weighted_scores_clip_when_public_inputs_exceed_one(self):
         self.assertEqual(score_uc1(A=2, U=2, F=2, D=2, C1=2), 1.0)
         self.assertEqual(score_uc2(M=2, K=2, E=2, R=2, C2=2), 1.0)
+
+    def test_scores_reject_nan_component_instead_of_returning_max_risk(self):
+        with self.assertRaises(ValueError):
+            score_uc1(A=float("nan"), U=2, F=2, D=2, C1=2)
+        with self.assertRaises(ValueError):
+            score_uc2(M=2, K=float("nan"), E=2, R=2, C2=2)
 
 
 if __name__ == "__main__":
