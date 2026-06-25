@@ -67,12 +67,14 @@ def load_incidents(path) -> list[Incident]:
     incidents = []
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
+        required_columns = {"dataset", "scenario", "details", "user", "start", "end"}
         _require_columns(
             Path(path).name,
             reader.fieldnames,
-            {"dataset", "scenario", "details", "user", "start", "end"},
+            required_columns,
         )
-        for row in reader:
+        for row_number, row in enumerate(reader, start=2):
+            row = _validate_row(Path(path).name, row_number, row, required_columns)
             if row["dataset"] != "4.2":
                 continue
             incidents.append(
@@ -116,7 +118,8 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
         with source_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             _require_columns(source_name, reader.fieldnames, required_columns)
-            for row in reader:
+            for row_number, row in enumerate(reader, start=2):
+                row = _validate_row(source_name, row_number, row, required_columns)
                 handler(row, profiles)
 
     return profiles
@@ -126,7 +129,7 @@ def robust_standardize(profile_vectors) -> dict[str, tuple[float, ...]]:
     if not profile_vectors:
         return {}
 
-    ordered_items = [(user_id, tuple(values)) for user_id, values in sorted(profile_vectors.items())]
+    ordered_items = _validate_profile_vectors(profile_vectors)
     width = len(ordered_items[0][1])
     columns = [[vector[index] for _, vector in ordered_items] for index in range(width)]
     centers = [median(column) for column in columns]
@@ -289,6 +292,47 @@ def _require_columns(source_name, fieldnames, required_columns) -> None:
     missing = sorted(required_columns - set(fieldnames))
     if missing:
         raise ValueError(f"{source_name} missing required columns: {', '.join(missing)}")
+
+
+def _validate_row(source_name, row_number, row, required_columns):
+    extras = row.get(None) or []
+    if extras:
+        raise ValueError(f"{source_name} row {row_number} has extra columns")
+
+    missing_values = sorted(column for column in required_columns if row.get(column) is None)
+    if missing_values:
+        raise ValueError(
+            f"{source_name} row {row_number} missing required values: {', '.join(missing_values)}"
+        )
+    return row
+
+
+def _validate_profile_vectors(profile_vectors):
+    ordered_items = []
+    expected_width = None
+
+    for user_id, values in sorted(profile_vectors.items()):
+        vector = tuple(values)
+        if expected_width is None:
+            expected_width = len(vector)
+        elif len(vector) != expected_width:
+            raise ValueError(
+                f"mixed vector widths: expected {expected_width}, got {len(vector)} for {user_id}"
+            )
+
+        normalized_values = []
+        for value in vector:
+            try:
+                normalized_value = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{user_id} vector must contain finite numeric values") from error
+            if not math.isfinite(normalized_value):
+                raise ValueError(f"{user_id} vector must contain finite numeric values")
+            normalized_values.append(normalized_value)
+
+        ordered_items.append((user_id, tuple(normalized_values)))
+
+    return ordered_items
 
 
 def _euclidean_distance(left, right) -> float:

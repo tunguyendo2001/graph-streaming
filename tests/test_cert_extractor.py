@@ -27,6 +27,40 @@ class CohortSelectionTest(unittest.TestCase):
             ["r4.2-1-INSIDER1.csv", "r4.2-2-INSIDER2.csv"],
         )
 
+    def test_load_incidents_rejects_extra_csv_columns_with_file_and_row_context(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "insiders.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "dataset,scenario,details,user,start,end",
+                        "4.2,1,r4.2-1-INSIDER1.csv,INSIDER1,01/02/2010 07:00:00,01/05/2010 18:00:00,EXTRA",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"insiders\.csv row 2.*extra columns"):
+                load_incidents(path)
+
+    def test_load_incidents_rejects_missing_required_values_with_file_and_row_context(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "insiders.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "dataset,scenario,details,user,start,end",
+                        "4.2,1,r4.2-1-INSIDER1.csv,INSIDER1,01/02/2010 07:00:00",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"insiders\.csv row 2.*missing required values: end"):
+                load_incidents(path)
+
     def test_build_activity_profiles_counts_from_fixtures(self):
         profiles = build_activity_profiles(FIXTURES)
 
@@ -48,6 +82,23 @@ class CohortSelectionTest(unittest.TestCase):
         self.assertEqual(control4.after_hours_logon_count, 1)
         self.assertEqual(control4.vector[2], 0.5)
 
+    def test_build_activity_profiles_rejects_malformed_rows_with_file_and_row_context(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{L1},01/02/2010 07:30:00,INSIDER1,PC-1001,Logon,EXTRA",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"logon\.csv row 2.*extra columns"):
+                build_activity_profiles(temp_path)
+
     def test_robust_standardize_handles_zero_mad_columns(self):
         standardized = robust_standardize(
             {
@@ -61,6 +112,24 @@ class CohortSelectionTest(unittest.TestCase):
         self.assertEqual(standardized["A"][1], 0.0)
         self.assertEqual(standardized["B"][1], 0.0)
         self.assertEqual(standardized["C"][1], 0.0)
+
+    def test_robust_standardize_rejects_mixed_vector_widths(self):
+        with self.assertRaisesRegex(ValueError, r"mixed vector widths"):
+            robust_standardize(
+                {
+                    "A": (1.0, 2.0),
+                    "B": (3.0,),
+                }
+            )
+
+    def test_robust_standardize_rejects_non_finite_values(self):
+        with self.assertRaisesRegex(ValueError, r"A.*finite numeric"):
+            robust_standardize(
+                {
+                    "A": (1.0, float("nan")),
+                    "B": (2.0, 3.0),
+                }
+            )
 
     def test_controls_never_include_ground_truth_users(self):
         controls = select_matched_controls(
