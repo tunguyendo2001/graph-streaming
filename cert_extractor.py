@@ -215,7 +215,7 @@ def iter_source_events(source_path: Path, source: str, cohort: set[str]) -> Iter
             if row.get("user") in cohort:
                 yield parse_cert_row(source, row)
 
-def write_sorted_runs(events: Iterable[Event], temporary_dir: Path, run_size: int) -> list[Path]:
+def write_sorted_runs(events: Iterable[Event], temporary_dir: Path, run_size: int, prefix: str = "") -> list[Path]:
     run_paths = []
     current_run = []
     run_idx = 0
@@ -226,7 +226,7 @@ def write_sorted_runs(events: Iterable[Event], temporary_dir: Path, run_size: in
             return
             
         current_run.sort(key=lambda e: (e.event_ts, e.event_id))
-        run_path = temporary_dir / f"run_{run_idx}.jsonl"
+        run_path = temporary_dir / f"{prefix}run_{run_idx}.jsonl"
         with open(run_path, "w") as f:
             for e in current_run:
                 f.write(json.dumps(e.to_record()) + "\n")
@@ -284,7 +284,7 @@ def extract_evaluation_stream(input_dir: Path, cohort: set[str], output_path: Pa
                     source_counts[src] += 1
                     yield item
                     
-            paths = write_sorted_runs(counting_generator(events, source), temp_path, run_size)
+            paths = write_sorted_runs(counting_generator(events, source), temp_path, run_size, prefix=f"{source}_")
             run_paths.extend(paths)
             
         merge_jsonl_runs(run_paths, output_path)
