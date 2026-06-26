@@ -8,6 +8,23 @@ from statistics import median
 
 
 CERT_DATE_FORMAT = "%m/%d/%Y %H:%M:%S"
+INCIDENT_COLUMNS = ("dataset", "scenario", "details", "user", "start", "end")
+LOGON_COLUMNS = ("id", "date", "user", "pc", "activity")
+DEVICE_COLUMNS = ("id", "date", "user", "pc", "activity")
+FILE_COLUMNS = ("id", "date", "user", "pc", "filename", "content")
+EMAIL_COLUMNS = (
+    "id",
+    "date",
+    "user",
+    "pc",
+    "to",
+    "cc",
+    "bcc",
+    "from",
+    "size",
+    "attachments",
+    "content",
+)
 FEATURE_NAMES = (
     "active_day_count",
     "logon_count",
@@ -65,16 +82,12 @@ class MatchedControl:
 
 def load_incidents(path) -> list[Incident]:
     incidents = []
+    source_name = Path(path).name
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        required_columns = {"dataset", "scenario", "details", "user", "start", "end"}
-        _require_columns(
-            Path(path).name,
-            reader.fieldnames,
-            required_columns,
-        )
+        _require_columns(source_name, reader.fieldnames, INCIDENT_COLUMNS)
         for row_number, row in enumerate(reader, start=2):
-            row = _validate_row(Path(path).name, row_number, row, required_columns)
+            row = _validate_row(source_name, row_number, row, INCIDENT_COLUMNS)
             if row["dataset"] != "4.2":
                 continue
             incidents.append(
@@ -82,8 +95,8 @@ def load_incidents(path) -> list[Incident]:
                     scenario=int(row["scenario"]),
                     details_file=row["details"],
                     user_id=row["user"],
-                    start=_parse_cert_datetime(row["start"]),
-                    end=_parse_cert_datetime(row["end"]),
+                    start=_parse_cert_datetime(row["start"], source_name, row_number, "start"),
+                    end=_parse_cert_datetime(row["end"], source_name, row_number, "end"),
                 )
             )
     return sorted(
@@ -105,26 +118,26 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
     for source_name, expected_columns, required_nonblank_fields, handler in (
         (
             "logon.csv",
-            {"id", "date", "user", "pc", "activity"},
+            LOGON_COLUMNS,
             {"date", "user", "pc", "activity"},
             _handle_logon_row,
         ),
         (
             "device.csv",
-            {"id", "date", "user", "pc", "activity"},
+            DEVICE_COLUMNS,
             {"date", "user", "pc", "activity"},
             _handle_device_row,
         ),
         (
             "file.csv",
-            {"id", "date", "user", "pc", "filename", "content"},
+            FILE_COLUMNS,
             {"date", "user", "pc", "filename", "content"},
             _handle_file_row,
         ),
         (
             "email.csv",
-            {"id", "date", "user", "pc", "to", "cc", "bcc", "from", "size", "attachments", "content"},
-            {"date", "user", "pc"},
+            EMAIL_COLUMNS,
+            {"id", "date", "user", "pc", "from", "size", "attachments"},
             _handle_email_row,
         ),
     ):
@@ -136,7 +149,8 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
             _require_columns(source_name, reader.fieldnames, expected_columns)
             for row_number, row in enumerate(reader, start=2):
                 row = _validate_row(source_name, row_number, row, required_nonblank_fields)
-                handler(row, profiles)
+                timestamp = _parse_cert_datetime(row["date"], source_name, row_number, "date")
+                handler(row, profiles, timestamp)
 
     return profiles
 
@@ -211,11 +225,21 @@ def write_cohort_manifest(path, incidents, controls) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    incidents = tuple(incidents)
+    controls = tuple(controls)
     incident_features = {}
     for match in controls:
         incident_features.setdefault(
             match.insider_id,
             _selection_features(match.insider_vector, match.insider_standardized_vector),
+        )
+    missing_feature_users = sorted(
+        {incident.user_id for incident in incidents} - set(incident_features)
+    )
+    if missing_feature_users:
+        raise ValueError(
+            "missing selection features for incident users: "
+            + ", ".join(missing_feature_users)
         )
 
     payload = {
@@ -253,10 +277,9 @@ def write_cohort_manifest(path, incidents, controls) -> None:
     )
 
 
-def _handle_logon_row(row, profiles) -> None:
+def _handle_logon_row(row, profiles, timestamp) -> None:
     if row["activity"] != "Logon":
         return
-    timestamp = _parse_cert_datetime(row["date"])
     profile = _get_profile(profiles, row["user"])
     _update_profile_context(profile, timestamp, row["pc"])
     profile.logon_count += 1
@@ -264,24 +287,21 @@ def _handle_logon_row(row, profiles) -> None:
         profile.after_hours_logon_count += 1
 
 
-def _handle_device_row(row, profiles) -> None:
+def _handle_device_row(row, profiles, timestamp) -> None:
     if row["activity"] != "Connect":
         return
-    timestamp = _parse_cert_datetime(row["date"])
     profile = _get_profile(profiles, row["user"])
     _update_profile_context(profile, timestamp, row["pc"])
     profile.device_connect_count += 1
 
 
-def _handle_file_row(row, profiles) -> None:
-    timestamp = _parse_cert_datetime(row["date"])
+def _handle_file_row(row, profiles, timestamp) -> None:
     profile = _get_profile(profiles, row["user"])
     _update_profile_context(profile, timestamp, row["pc"])
     profile.file_copy_count += 1
 
 
-def _handle_email_row(row, profiles) -> None:
-    timestamp = _parse_cert_datetime(row["date"])
+def _handle_email_row(row, profiles, timestamp) -> None:
     profile = _get_profile(profiles, row["user"])
     _update_profile_context(profile, timestamp, row["pc"])
     profile.email_count += 1
@@ -299,15 +319,25 @@ def _update_profile_context(profile, timestamp, machine_id) -> None:
         profile.machines.add(machine_id)
 
 
-def _parse_cert_datetime(value: str) -> datetime:
-    return datetime.strptime(value, CERT_DATE_FORMAT)
+def _parse_cert_datetime(value: str, source_name: str, row_number: int, column_name: str) -> datetime:
+    try:
+        return datetime.strptime(value, CERT_DATE_FORMAT)
+    except ValueError as exc:
+        raise ValueError(
+            f"{source_name} row {row_number} column {column_name} "
+            f"has invalid timestamp {value!r}; expected {CERT_DATE_FORMAT}"
+        ) from exc
 
 
-def _require_columns(source_name, fieldnames, required_columns) -> None:
+def _require_columns(source_name, fieldnames, expected_columns) -> None:
     fieldnames = fieldnames or []
-    missing = sorted(required_columns - set(fieldnames))
-    if missing:
-        raise ValueError(f"{source_name} missing required columns: {', '.join(missing)}")
+    if tuple(fieldnames) != tuple(expected_columns):
+        expected = ", ".join(expected_columns)
+        actual = ", ".join(fieldnames) if fieldnames else "<none>"
+        raise ValueError(
+            f"{source_name} header must match official CERT fields: "
+            f"expected {expected}; got {actual}"
+        )
 
 
 def _validate_row(source_name, row_number, row, required_columns):

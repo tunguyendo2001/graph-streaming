@@ -15,6 +15,8 @@ from cert_extractor import (
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
+OFFICIAL_EMAIL_HEADER = "id,date,user,pc,to,cc,bcc,from,size,attachments,content"
+
 
 class CohortSelectionTest(unittest.TestCase):
     def test_load_incidents_keeps_only_dataset_4_2(self):
@@ -81,6 +83,30 @@ class CohortSelectionTest(unittest.TestCase):
             ):
                 load_incidents(path)
 
+    def test_load_incidents_rejects_invalid_timestamps_with_file_row_and_column_context(self):
+        for column, values in (
+            ("start", ["4.2", "1", "r4.2-1-INSIDER1.csv", "INSIDER1", "not-a-date", "01/05/2010 18:00:00"]),
+            ("end", ["4.2", "1", "r4.2-1-INSIDER1.csv", "INSIDER1", "01/02/2010 07:00:00", "not-a-date"]),
+        ):
+            with self.subTest(column=column), TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "insiders.csv"
+                path.write_text(
+                    "\n".join(
+                        [
+                            "dataset,scenario,details,user,start,end",
+                            ",".join(values),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"insiders\.csv row 2 column {column}.*invalid timestamp",
+                ):
+                    load_incidents(path)
+
     def test_build_activity_profiles_counts_from_fixtures(self):
         profiles = build_activity_profiles(FIXTURES)
 
@@ -135,9 +161,41 @@ class CohortSelectionTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                r"email\.csv missing required columns: .*attachments.*bcc.*cc.*content.*from.*id.*size.*to|email\.csv missing required columns: .*id.*to.*cc.*bcc.*from.*size.*attachments.*content",
+                r"email\.csv header must match official CERT fields",
             ):
                 build_activity_profiles(temp_path)
+
+    def test_build_activity_profiles_rejects_extra_shuffled_or_duplicate_email_headers(self):
+        cases = (
+            (
+                "extra",
+                OFFICIAL_EMAIL_HEADER + ",extra",
+                "{E1},01/02/2010 07:45:00,INSIDER1,PC-1001,one@example.com,,,inside1@example.com,100,0,hello,ignored",
+            ),
+            (
+                "shuffled",
+                "date,id,user,pc,to,cc,bcc,from,size,attachments,content",
+                "01/02/2010 07:45:00,{E1},INSIDER1,PC-1001,one@example.com,,,inside1@example.com,100,0,hello",
+            ),
+            (
+                "duplicate",
+                OFFICIAL_EMAIL_HEADER + ",content",
+                "{E1},01/02/2010 07:45:00,INSIDER1,PC-1001,one@example.com,,,inside1@example.com,100,0,hello,duplicate",
+            ),
+        )
+        for label, header, row in cases:
+            with self.subTest(label=label), TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                (temp_path / "email.csv").write_text(
+                    "\n".join([header, row]) + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"email\.csv header must match official CERT fields",
+                ):
+                    build_activity_profiles(temp_path)
 
     def test_build_activity_profiles_rejects_empty_or_whitespace_required_values_with_field_context(self):
         with TemporaryDirectory() as temp_dir:
@@ -158,6 +216,100 @@ class CohortSelectionTest(unittest.TestCase):
                 r"logon\.csv row 2.*missing required values: pc, user|logon\.csv row 2.*missing required values: user, pc",
             ):
                 build_activity_profiles(temp_path)
+
+    def test_build_activity_profiles_rejects_invalid_activity_timestamps_with_file_row_and_column_context(self):
+        cases = (
+            (
+                "logon.csv",
+                "id,date,user,pc,activity",
+                "{L1},not-a-date,INSIDER1,PC-1001,Logoff",
+            ),
+            (
+                "device.csv",
+                "id,date,user,pc,activity",
+                "{D1},not-a-date,INSIDER1,PC-1001,Disconnect",
+            ),
+            (
+                "file.csv",
+                "id,date,user,pc,filename,content",
+                "{F1},not-a-date,INSIDER1,PC-1001,file-a.doc,alpha",
+            ),
+            (
+                "email.csv",
+                OFFICIAL_EMAIL_HEADER,
+                "{E1},not-a-date,INSIDER1,PC-1001,one@example.com,,,inside1@example.com,100,0,hello",
+            ),
+        )
+        for source_name, header, row in cases:
+            with self.subTest(source_name=source_name), TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                (temp_path / source_name).write_text(
+                    "\n".join([header, row]) + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{source_name} row 2 column date.*invalid timestamp",
+                ):
+                    build_activity_profiles(temp_path)
+
+    def test_build_activity_profiles_rejects_blank_required_email_values(self):
+        required_fields = ("id", "date", "user", "pc", "from", "size", "attachments")
+        base_row = {
+            "id": "{E1}",
+            "date": "01/02/2010 07:45:00",
+            "user": "INSIDER1",
+            "pc": "PC-1001",
+            "to": "one@example.com",
+            "cc": "",
+            "bcc": "",
+            "from": "inside1@example.com",
+            "size": "100",
+            "attachments": "0",
+            "content": "hello",
+        }
+        fields = OFFICIAL_EMAIL_HEADER.split(",")
+
+        for field in required_fields:
+            with self.subTest(field=field), TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                row = dict(base_row)
+                row[field] = "   "
+                (temp_path / "email.csv").write_text(
+                    "\n".join(
+                        [
+                            OFFICIAL_EMAIL_HEADER,
+                            ",".join(row[column] for column in fields),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"email\.csv row 2.*missing required values: {field}",
+                ):
+                    build_activity_profiles(temp_path)
+
+    def test_build_activity_profiles_allows_blank_optional_email_values(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "email.csv").write_text(
+                "\n".join(
+                    [
+                        OFFICIAL_EMAIL_HEADER,
+                        "{E1},01/02/2010 07:45:00,INSIDER1,PC-1001,,,,inside1@example.com,100,0,",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            profiles = build_activity_profiles(temp_path)
+
+        self.assertEqual(profiles["INSIDER1"].email_count, 1)
 
     def test_robust_standardize_handles_zero_mad_columns(self):
         standardized = robust_standardize(
@@ -260,6 +412,19 @@ class CohortSelectionTest(unittest.TestCase):
         self.assertTrue(
             all("is_insider" not in record["selection_features"] for record in first_payload["controls"])
         )
+
+    def test_manifest_requires_selection_features_for_every_incident_user(self):
+        incidents = load_incidents(FIXTURES / "answers" / "insiders.csv")
+        controls = select_matched_controls(self.fixture_profiles(), {"INSIDER1"}, 1)
+
+        with TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "cohort.json"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"missing selection features for incident users: INSIDER2",
+            ):
+                write_cohort_manifest(output_path, incidents, controls)
 
     @staticmethod
     def fixture_profiles():
