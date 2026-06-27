@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -111,11 +112,8 @@ def load_incidents(path) -> list[Incident]:
     )
 
 
-def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
-    root = Path(input_dir)
-    profiles: dict[str, ActivityProfile] = {}
-
-    for source_name, expected_columns, required_nonblank_fields, handler in (
+def _activity_sources():
+    return (
         (
             "logon.csv",
             LOGON_COLUMNS,
@@ -140,7 +138,35 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
             {"id", "date", "user", "pc", "from", "size", "attachments"},
             _handle_email_row,
         ),
-    ):
+    )
+
+
+def _collect_activity_user_ids(input_dir) -> set[str]:
+    root = Path(input_dir)
+    user_ids: set[str] = set()
+
+    for source_name, expected_columns, required_nonblank_fields, _handler in _activity_sources():
+        source_path = root / source_name
+        if not source_path.exists():
+            continue
+        with source_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            _require_columns(source_name, reader.fieldnames, expected_columns)
+            for row_number, row in enumerate(reader, start=2):
+                row = _validate_row(source_name, row_number, row, required_nonblank_fields)
+                _parse_cert_datetime(row["date"], source_name, row_number, "date")
+                user_ids.add(row["user"])
+
+    return user_ids
+
+
+def build_activity_profiles(input_dir, *, before: datetime | None = None, user_ids=None) -> dict[str, ActivityProfile]:
+    root = Path(input_dir)
+    profiles: dict[str, ActivityProfile] = {
+        user_id: ActivityProfile(user_id=user_id) for user_id in sorted(set(user_ids or ()))
+    }
+
+    for source_name, expected_columns, required_nonblank_fields, handler in _activity_sources():
         source_path = root / source_name
         if not source_path.exists():
             continue
@@ -150,6 +176,8 @@ def build_activity_profiles(input_dir) -> dict[str, ActivityProfile]:
             for row_number, row in enumerate(reader, start=2):
                 row = _validate_row(source_name, row_number, row, required_nonblank_fields)
                 timestamp = _parse_cert_datetime(row["date"], source_name, row_number, "date")
+                if before is not None and timestamp >= before:
+                    continue
                 handler(row, profiles, timestamp)
 
     return profiles
@@ -175,10 +203,85 @@ def robust_standardize(profile_vectors) -> dict[str, tuple[float, ...]]:
 
 
 def select_matched_controls(
+    profiles_or_input_dir=None,
+    insider_ids_or_incidents=None,
+    controls_per_insider=None,
+    *,
+    profiles=None,
+    insider_ids=None,
+    incidents=None,
+    input_dir=None,
+) -> tuple[MatchedControl, ...]:
+    positional_arguments_used = (
+        profiles_or_input_dir is not None or insider_ids_or_incidents is not None
+    )
+    profile_keyword_arguments_used = profiles is not None or insider_ids is not None
+    incident_keyword_arguments_used = input_dir is not None or incidents is not None
+
+    if profile_keyword_arguments_used and incident_keyword_arguments_used:
+        raise TypeError(
+            "select_matched_controls cannot mix profile-based and incident-aware keyword aliases"
+        )
+
+    if profile_keyword_arguments_used or incident_keyword_arguments_used:
+        if positional_arguments_used:
+            raise TypeError(
+                "select_matched_controls accepts either positional arguments or keyword aliases, not both"
+            )
+        if profile_keyword_arguments_used:
+            if profiles is None or insider_ids is None:
+                raise TypeError(
+                    "profile-based matching requires profiles and insider_ids"
+                )
+            profiles_or_input_dir = profiles
+            insider_ids_or_incidents = insider_ids
+        else:
+            if input_dir is None or incidents is None:
+                raise TypeError(
+                    "incident-aware matching requires input_dir and incidents"
+                )
+            profiles_or_input_dir = input_dir
+            insider_ids_or_incidents = incidents
+
+    if controls_per_insider is None:
+        raise TypeError("controls_per_insider is required")
+    if profiles_or_input_dir is None or insider_ids_or_incidents is None:
+        raise TypeError("select_matched_controls requires profiles/input_dir and insider ids/incidents")
+
+    insiders_or_incidents = tuple(insider_ids_or_incidents)
+    if not insiders_or_incidents:
+        return ()
+    if _is_incident_collection(insiders_or_incidents):
+        if isinstance(profiles_or_input_dir, Mapping):
+            raise TypeError(
+                "incident-aware matching requires an input directory so activity can be "
+                "rebuilt before each incident cutoff"
+            )
+        return _select_incident_matched_controls(
+            profiles_or_input_dir,
+            insiders_or_incidents,
+            controls_per_insider,
+        )
+
+    return _select_profile_matched_controls(
+        profiles_or_input_dir,
+        insiders_or_incidents,
+        controls_per_insider,
+    )
+
+
+def _is_incident_collection(items) -> bool:
+    return all(isinstance(item, Incident) for item in items)
+
+
+def _select_profile_matched_controls(
     profiles,
     insider_ids,
     controls_per_insider,
 ) -> tuple[MatchedControl, ...]:
+    if not isinstance(profiles, Mapping):
+        raise TypeError("profile-based matching requires a mapping of ActivityProfile objects")
+
     insider_ids = set(insider_ids)
     profile_vectors = {user_id: profile.vector for user_id, profile in profiles.items()}
     standardized_vectors = robust_standardize(profile_vectors)
@@ -191,6 +294,91 @@ def select_matched_controls(
             raise KeyError(f"Unknown insider profile: {insider_id}")
         for _ in range(controls_per_insider):
             pool = remaining_candidate_ids if remaining_candidate_ids else candidate_ids
+            if not pool:
+                break
+            control_id = min(
+                pool,
+                key=lambda user_id: (
+                    _euclidean_distance(standardized_vectors[insider_id], standardized_vectors[user_id]),
+                    user_id,
+                ),
+            )
+            distance = _euclidean_distance(
+                standardized_vectors[insider_id],
+                standardized_vectors[control_id],
+            )
+            matches.append(
+                MatchedControl(
+                    insider_id=insider_id,
+                    control_id=control_id,
+                    distance=distance,
+                    insider_vector=profile_vectors[insider_id],
+                    control_vector=profile_vectors[control_id],
+                    insider_standardized_vector=standardized_vectors[insider_id],
+                    control_standardized_vector=standardized_vectors[control_id],
+                )
+            )
+            if control_id in remaining_candidate_ids:
+                remaining_candidate_ids.remove(control_id)
+
+    return tuple(matches)
+
+
+def _profile_has_activity(profile: ActivityProfile) -> bool:
+    return any(value != 0.0 for value in profile.vector)
+
+
+def _select_incident_matched_controls(
+    input_dir,
+    incidents: tuple[Incident, ...],
+    controls_per_insider,
+) -> tuple[MatchedControl, ...]:
+    if isinstance(input_dir, Mapping):
+        raise TypeError(
+            "incident-aware matching requires an input directory so activity can be "
+            "rebuilt before each incident cutoff"
+        )
+
+    earliest_cutoffs: dict[str, datetime] = {}
+    for incident in incidents:
+        existing_cutoff = earliest_cutoffs.get(incident.user_id)
+        if existing_cutoff is None or incident.start < existing_cutoff:
+            earliest_cutoffs[incident.user_id] = incident.start
+
+    if not earliest_cutoffs:
+        return ()
+
+    insider_ids = set(earliest_cutoffs)
+    activity_user_ids = _collect_activity_user_ids(input_dir) | insider_ids
+    candidate_ids = sorted(activity_user_ids - insider_ids)
+    remaining_candidate_ids = candidate_ids.copy()
+    matches: list[MatchedControl] = []
+    profiles_by_cutoff: dict[datetime, dict[str, ActivityProfile]] = {}
+
+    for insider_id in sorted(insider_ids, key=lambda user_id: (earliest_cutoffs[user_id], user_id)):
+        cutoff = earliest_cutoffs[insider_id]
+        profiles = profiles_by_cutoff.get(cutoff)
+        if profiles is None:
+            profiles = build_activity_profiles(
+                input_dir,
+                before=cutoff,
+                user_ids=activity_user_ids,
+            )
+            profiles_by_cutoff[cutoff] = profiles
+        eligible_candidate_ids = [
+            user_id for user_id in candidate_ids if _profile_has_activity(profiles[user_id])
+        ]
+        eligible_candidate_id_set = set(eligible_candidate_ids)
+        profile_ids = sorted(eligible_candidate_id_set | {insider_id})
+        profile_vectors = {user_id: profiles[user_id].vector for user_id in profile_ids}
+        standardized_vectors = robust_standardize(profile_vectors)
+
+        for _ in range(controls_per_insider):
+            pool = [
+                user_id
+                for user_id in remaining_candidate_ids
+                if user_id in eligible_candidate_id_set
+            ]
             if not pool:
                 break
             control_id = min(

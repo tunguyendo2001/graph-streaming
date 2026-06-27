@@ -1,10 +1,12 @@
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from cert_extractor import (
     ActivityProfile,
+    Incident,
     build_activity_profiles,
     load_incidents,
     robust_standardize,
@@ -354,6 +356,160 @@ class CohortSelectionTest(unittest.TestCase):
             {"INSIDER1", "INSIDER2"} & {control.control_id for control in controls}
         )
 
+    def test_select_matched_controls_rejects_mixed_keyword_aliases(self):
+        incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+
+        with self.assertRaisesRegex(TypeError, r"cannot mix"):
+            select_matched_controls(
+                profiles=self.fixture_profiles(),
+                incidents=[incident],
+                controls_per_insider=1,
+            )
+
+        with self.assertRaisesRegex(TypeError, r"cannot mix"):
+            select_matched_controls(
+                input_dir=FIXTURES,
+                insider_ids={"INSIDER1"},
+                controls_per_insider=1,
+            )
+
+    def test_select_matched_controls_accepts_incident_keyword_path_aliases(self):
+        class PathWithItems:
+            def __init__(self, value):
+                self.value = Path(value)
+
+            def __fspath__(self):
+                return str(self.value)
+
+            def items(self):
+                raise AssertionError("path-like object must not be treated as a mapping")
+
+        incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{I-pre},01/01/2010 08:00:00,INSIDER1,PC-I,Logon",
+                        "{A-pre},01/01/2010 08:00:00,CONTROL_A,PC-I,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(
+                input_dir=PathWithItems(input_dir),
+                incidents=[incident],
+                controls_per_insider=1,
+            )
+
+        self.assertEqual([(match.insider_id, match.control_id) for match in controls], [("INSIDER1", "CONTROL_A")])
+
+    def test_incident_matching_excludes_future_only_controls(self):
+        incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{I-pre},01/01/2010 08:00:00,INSIDER1,PC-I,Logon",
+                        "{A-pre},01/01/2010 08:00:00,CONTROL_A,PC-A,Logon",
+                        "{Z-post},01/03/2010 08:00:00,CONTROL_Z,PC-Z,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(input_dir, [incident], 2)
+
+        self.assertEqual([(match.insider_id, match.control_id) for match in controls], [("INSIDER1", "CONTROL_A")])
+
+    def test_incident_matching_does_not_reuse_controls_when_pool_is_short(self):
+        incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{I-pre},01/01/2010 08:00:00,INSIDER1,PC-I,Logon",
+                        "{A-pre},01/01/2010 08:00:00,CONTROL_A,PC-A,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(input_dir, [incident], 3)
+
+        self.assertEqual([(match.insider_id, match.control_id) for match in controls], [("INSIDER1", "CONTROL_A")])
+
+    def test_incident_matching_prioritizes_earliest_cutoff_when_controls_are_scarce(self):
+        earlier_incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-Z_INSIDER.csv",
+            user_id="Z_INSIDER",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+        later_incident = Incident(
+            scenario=2,
+            details_file="r4.2-2-A_INSIDER.csv",
+            user_id="A_INSIDER",
+            start=datetime(2010, 1, 4, 9, 0, 0),
+            end=datetime(2010, 1, 6, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{Z-pre},01/01/2010 08:00:00,Z_INSIDER,PC-Z,Logon",
+                        "{A-pre},01/03/2010 08:00:00,A_INSIDER,PC-A,Logon",
+                        "{C-pre},01/01/2010 08:00:00,CONTROL_ONLY,PC-C,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(input_dir, [later_incident, earlier_incident], 1)
+
+        self.assertEqual([(match.insider_id, match.control_id) for match in controls], [("Z_INSIDER", "CONTROL_ONLY")])
+
     def test_nearest_controls_do_not_reuse_and_stay_deterministic(self):
         first = select_matched_controls(self.fixture_profiles(), {"INSIDER1", "INSIDER2"}, 2)
         second = select_matched_controls(self.fixture_profiles(), {"INSIDER1", "INSIDER2"}, 2)
@@ -372,6 +528,123 @@ class CohortSelectionTest(unittest.TestCase):
             len({match.control_id for match in first}),
             len(first),
         )
+
+    def test_incident_aware_matching_excludes_activity_at_or_after_incident_start(self):
+        incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+        later_incident = Incident(
+            scenario=2,
+            details_file="r4.2-2-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 4, 9, 0, 0),
+            end=datetime(2010, 1, 6, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{I-pre},01/01/2010 08:00:00,INSIDER1,PC-I,Logon",
+                        "{I-at},01/02/2010 09:00:00,INSIDER1,PC-CUTOFF,Logon",
+                        "{I-post-1},01/03/2010 19:00:00,INSIDER1,PC-POST1,Logon",
+                        "{I-post-2},01/03/2010 08:00:00,INSIDER1,PC-POST2,Logon",
+                        "{A-pre},01/01/2010 08:00:00,CONTROL_A,PC-I,Logon",
+                        "{B-pre-1},01/01/2010 08:00:00,CONTROL_B,PC-B1,Logon",
+                        "{B-pre-2},01/01/2010 19:00:00,CONTROL_B,PC-B2,Logon",
+                        "{B-at},01/02/2010 09:00:00,CONTROL_B,PC-B3,Logon",
+                        "{B-post},01/03/2010 08:00:00,CONTROL_B,PC-B4,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(input_dir, [later_incident, incident], 1)
+
+            output_path = input_dir / "cohort.json"
+            write_cohort_manifest(output_path, [later_incident, incident], controls)
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            leaked_profiles = build_activity_profiles(input_dir)
+
+        self.assertEqual(len(controls), 1)
+        match = controls[0]
+        expected_vector = (1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        leaked_full_history_vector = (3.0, 4.0, 0.25, 0.0, 0.0, 0.0, 4.0)
+        self.assertEqual(leaked_profiles["INSIDER1"].vector, leaked_full_history_vector)
+        self.assertEqual(leaked_profiles["CONTROL_B"].vector, leaked_full_history_vector)
+        self.assertNotEqual(leaked_profiles["CONTROL_A"].vector, leaked_full_history_vector)
+        self.assertEqual(match.control_id, "CONTROL_A")
+        self.assertEqual(match.distance, 0.0)
+        self.assertEqual(match.insider_vector, expected_vector)
+        self.assertEqual(match.control_vector, expected_vector)
+        self.assertNotEqual(match.insider_vector, leaked_full_history_vector)
+
+        incident_features = payload["incidents"][0]["selection_features"]
+        self.assertEqual(incident_features["active_day_count"], 1.0)
+        self.assertEqual(incident_features["logon_count"], 1.0)
+        self.assertEqual(incident_features["distinct_machine_count"], 1.0)
+        self.assertEqual(
+            incident_features["standardized_vector"],
+            list(match.insider_standardized_vector),
+        )
+        self.assertEqual(
+            [record["selection_features"] for record in payload["incidents"]],
+            [incident_features, incident_features],
+        )
+
+        control_features = payload["controls"][0]["selection_features"]
+        self.assertEqual(control_features["active_day_count"], 1.0)
+        self.assertEqual(control_features["logon_count"], 1.0)
+        self.assertEqual(control_features["distinct_machine_count"], 1.0)
+
+    def test_incident_aware_matching_uses_earliest_cutoff_for_multiple_incidents(self):
+        earlier_incident = Incident(
+            scenario=1,
+            details_file="r4.2-1-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 2, 9, 0, 0),
+            end=datetime(2010, 1, 5, 18, 0, 0),
+        )
+        later_incident = Incident(
+            scenario=2,
+            details_file="r4.2-2-INSIDER1.csv",
+            user_id="INSIDER1",
+            start=datetime(2010, 1, 4, 9, 0, 0),
+            end=datetime(2010, 1, 6, 18, 0, 0),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{I-pre},01/01/2010 08:00:00,INSIDER1,PC-I,Logon",
+                        "{I-cutoff},01/02/2010 09:00:00,INSIDER1,PC-CUTOFF,Logon",
+                        "{I-post},01/03/2010 08:00:00,INSIDER1,PC-POST,Logon",
+                        "{A-pre},01/01/2010 08:00:00,CONTROL_A,PC-A,Logon",
+                        "{A-cutoff},01/02/2010 09:00:00,CONTROL_A,PC-CUTOFF,Logon",
+                        "{A-post},01/03/2010 08:00:00,CONTROL_A,PC-POST,Logon",
+                        "{B-pre},01/01/2010 08:00:00,CONTROL_B,PC-B,Logon",
+                        "{B-post},01/03/2010 08:00:00,CONTROL_B,PC-POST,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            controls = select_matched_controls(input_dir, [later_incident, earlier_incident], 1)
+
+        self.assertEqual([(match.insider_id, match.control_id) for match in controls], [("INSIDER1", "CONTROL_A")])
+        self.assertEqual(controls[0].insider_vector, (1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(controls[0].control_vector, (1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
 
     def test_manifest_is_deterministic_round_trippable_and_contains_no_fabricated_users(self):
         incidents = load_incidents(FIXTURES / "answers" / "insiders.csv")
