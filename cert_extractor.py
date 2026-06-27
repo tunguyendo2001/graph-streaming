@@ -1,11 +1,16 @@
 import csv
+import heapq
 import json
 import math
+import tempfile
+from contextlib import ExitStack
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from statistics import median
+
+from event_model import parse_cert_row
 
 
 CERT_DATE_FORMAT = "%m/%d/%Y %H:%M:%S"
@@ -13,6 +18,7 @@ INCIDENT_COLUMNS = ("dataset", "scenario", "details", "user", "start", "end")
 LOGON_COLUMNS = ("id", "date", "user", "pc", "activity")
 DEVICE_COLUMNS = ("id", "date", "user", "pc", "activity")
 FILE_COLUMNS = ("id", "date", "user", "pc", "filename", "content")
+HTTP_COLUMNS = ("id", "date", "user", "pc", "url")
 EMAIL_COLUMNS = (
     "id",
     "date",
@@ -26,6 +32,7 @@ EMAIL_COLUMNS = (
     "attachments",
     "content",
 )
+EVENT_SOURCE_FILES = ("logon.csv", "device.csv", "file.csv", "http.csv", "email.csv")
 FEATURE_NAMES = (
     "active_day_count",
     "logon_count",
@@ -79,6 +86,14 @@ class MatchedControl:
     control_vector: tuple[float, ...]
     insider_standardized_vector: tuple[float, ...]
     control_standardized_vector: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ExtractionResult:
+    event_count: int
+    first_event_time: int | None
+    last_event_time: int | None
+    source_counts: dict[str, int]
 
 
 def load_incidents(path) -> list[Incident]:
@@ -465,6 +480,114 @@ def write_cohort_manifest(path, incidents, controls) -> None:
     )
 
 
+def iter_source_events(source_path, source, cohort):
+    source_path = Path(source_path)
+    cohort = {str(user_id) for user_id in cohort}
+    if not source_path.exists():
+        raise FileNotFoundError(f"required CERT source file is missing: {source_path}")
+
+    expected_columns, required_columns = _source_event_spec(source)
+    with source_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        _require_columns(source_path.name, reader.fieldnames, expected_columns)
+        for row_number, row in enumerate(reader, start=2):
+            row = _validate_row(source_path.name, row_number, row, required_columns)
+            timestamp = _parse_cert_datetime(row["date"], source_path.name, row_number, "date")
+            user_id = row["user"]
+            if user_id not in cohort:
+                continue
+            yield _normalize_source_event(source, row, timestamp)
+
+
+def _require_event_sources(input_dir: Path) -> None:
+    for source_name in EVENT_SOURCE_FILES:
+        source_path = input_dir / source_name
+        if not source_path.exists():
+            raise FileNotFoundError(f"required CERT source file is missing: {source_path}")
+
+
+def write_sorted_runs(events, temporary_dir, run_size):
+    if run_size <= 0:
+        raise ValueError("run_size must be greater than 0")
+
+    temporary_dir = Path(temporary_dir)
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+
+    run_paths: list[Path] = []
+    batch: list[dict[str, object]] = []
+    for event in events:
+        batch.append(event)
+        if len(batch) >= run_size:
+            run_paths.append(_write_sorted_run(batch, temporary_dir, len(run_paths)))
+            batch = []
+
+    if batch:
+        run_paths.append(_write_sorted_run(batch, temporary_dir, len(run_paths)))
+
+    return run_paths
+
+
+def merge_jsonl_runs(run_paths, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    event_count = 0
+    first_event_time: int | None = None
+    last_event_time: int | None = None
+    source_counts: dict[str, int] = {}
+
+    with ExitStack() as stack:
+        iterators = [
+            _jsonl_event_iterator(stack.enter_context(Path(run_path).open("r", encoding="utf-8")))
+            for run_path in run_paths
+        ]
+        with output_path.open("w", encoding="utf-8") as output_handle:
+            for event in heapq.merge(
+                *iterators,
+                key=lambda record: (record["event_ts"], record["event_id"]),
+            ):
+                output_handle.write(json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False))
+                output_handle.write("\n")
+                event_count += 1
+                event_ts = event["event_ts"]
+                if first_event_time is None:
+                    first_event_time = event_ts
+                last_event_time = event_ts
+                source = event["source"]
+                source_counts[source] = source_counts.get(source, 0) + 1
+
+    return ExtractionResult(
+        event_count=event_count,
+        first_event_time=first_event_time,
+        last_event_time=last_event_time,
+        source_counts=source_counts,
+    )
+
+
+def extract_evaluation_stream(input_dir, cohort, output_path, run_size=50000) -> ExtractionResult:
+    input_dir = Path(input_dir)
+    output_path = Path(output_path)
+    cohort = {str(user_id) for user_id in cohort}
+
+    if run_size <= 0:
+        raise ValueError("run_size must be greater than 0")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _require_event_sources(input_dir)
+
+    events = (
+        event
+        for source_name in EVENT_SOURCE_FILES
+        for event in iter_source_events(input_dir / source_name, source_name[:-4], cohort)
+    )
+
+    temp_parent = output_path.parent if output_path.parent != Path("") else None
+    with tempfile.TemporaryDirectory(dir=temp_parent, prefix=f".{output_path.stem}-runs-") as temporary_dir:
+        temporary_dir = Path(temporary_dir)
+        run_paths = write_sorted_runs(events, temporary_dir, run_size)
+        return merge_jsonl_runs(run_paths, output_path)
+
+
 def _handle_logon_row(row, profiles, timestamp) -> None:
     if row["activity"] != "Logon":
         return
@@ -586,3 +709,45 @@ def _selection_features(raw_vector, standardized_vector) -> dict[str, object]:
         **{name: raw_vector[index] for index, name in enumerate(FEATURE_NAMES)},
         "standardized_vector": list(standardized_vector),
     }
+
+
+def _source_event_spec(source: str):
+    if source == "logon":
+        return LOGON_COLUMNS, {"id", "date", "user", "pc", "activity"}
+    if source == "device":
+        return DEVICE_COLUMNS, {"id", "date", "user", "pc", "activity"}
+    if source == "file":
+        return FILE_COLUMNS, {"id", "date", "user", "pc", "filename", "content"}
+    if source == "http":
+        return HTTP_COLUMNS, {"id", "date", "user", "pc", "url"}
+    if source == "email":
+        return EMAIL_COLUMNS, {"id", "date", "user", "pc", "from", "size", "attachments"}
+    raise ValueError(f"unknown source: {source}")
+
+
+def _normalize_source_event(source: str, row: dict[str, str], timestamp: datetime) -> dict[str, object]:
+    event = parse_cert_row(source, {**row, "date": timestamp.strftime(CERT_DATE_FORMAT)})
+    event_record = event.to_record()
+    properties = event_record.pop("properties")
+    return {
+        **event_record,
+        "action": event.kind,
+        "pc": event.machine_id,
+        **properties,
+    }
+
+
+def _write_sorted_run(events, temporary_dir: Path, run_index: int) -> Path:
+    sorted_events = sorted(events, key=lambda event: (event["event_ts"], event["event_id"]))
+    run_path = temporary_dir / f"run-{run_index:06d}.jsonl"
+    with run_path.open("w", encoding="utf-8") as handle:
+        for event in sorted_events:
+            handle.write(json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False))
+            handle.write("\n")
+    return run_path
+
+
+def _jsonl_event_iterator(handle):
+    for line in handle:
+        if line.strip():
+            yield json.loads(line)

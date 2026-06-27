@@ -8,6 +8,7 @@ from cert_extractor import (
     ActivityProfile,
     Incident,
     build_activity_profiles,
+    extract_evaluation_stream,
     load_incidents,
     robust_standardize,
     select_matched_controls,
@@ -698,6 +699,84 @@ class CohortSelectionTest(unittest.TestCase):
                 r"missing selection features for incident users: INSIDER2",
             ):
                 write_cohort_manifest(output_path, incidents, controls)
+
+    def test_extract_keeps_only_cohort_and_discards_content(self):
+        with TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "stream.jsonl"
+            result = extract_evaluation_stream(
+                input_dir=FIXTURES,
+                cohort={"INSIDER1", "CONTROL1"},
+                output_path=output_path,
+                run_size=2,
+            )
+
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertTrue(records)
+        self.assertTrue(all(record["user_id"] in {"INSIDER1", "CONTROL1"} for record in records))
+        self.assertTrue(all("content" not in record for record in records))
+        self.assertTrue(all("activity" in record or "action" in record for record in records))
+        self.assertIn("http", {record["source"] for record in records})
+        file_record = next(record for record in records if record["source"] == "file")
+        self.assertEqual(file_record["extension"], ".doc")
+        email_record = next(record for record in records if record["source"] == "email")
+        self.assertEqual(email_record["sender"], "inside1@example.com")
+        self.assertEqual(email_record["recipient_count"], len(email_record["recipients"]))
+        self.assertEqual(email_record["size"], 100)
+        self.assertEqual(email_record["attachments"], 0)
+        self.assertNotIn("to", email_record)
+        self.assertNotIn("cc", email_record)
+        self.assertNotIn("bcc", email_record)
+        self.assertNotIn("from", email_record)
+        http_record = next(record for record in records if record["source"] == "http")
+        self.assertEqual(http_record["domain"], "example.com")
+        self.assertIn("cloud_signal", http_record)
+        self.assertEqual(result.event_count, len(records))
+
+    def test_external_merge_orders_by_event_time_then_event_id(self):
+        with TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "stream.jsonl"
+            extract_evaluation_stream(
+                input_dir=FIXTURES,
+                cohort={"INSIDER1", "CONTROL1"},
+                output_path=output_path,
+                run_size=2,
+            )
+
+            records = [
+                json.loads(line)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        ordering = [(record["event_ts"], record["event_id"]) for record in records]
+        self.assertEqual(ordering, sorted(ordering))
+
+    def test_extract_fails_fast_when_required_source_is_missing(self):
+        with TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            (input_dir / "logon.csv").write_text(
+                "\n".join(
+                    [
+                        "id,date,user,pc,activity",
+                        "{L1},01/02/2010 07:30:00,INSIDER1,PC-1001,Logon",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(FileNotFoundError, r"device\.csv"):
+                extract_evaluation_stream(
+                    input_dir=input_dir,
+                    cohort={"INSIDER1"},
+                    output_path=input_dir / "stream.jsonl",
+                    run_size=2,
+                )
 
     @staticmethod
     def fixture_profiles():
