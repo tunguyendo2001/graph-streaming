@@ -7,9 +7,12 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from baselines import (
     domain_novelty,
+    email_fanout_deviation,
     logon_hour_anomaly,
     robust_deviation,
     score_uc1,
+    score_uc2,
+    social_neighborhood_novelty,
     temporal_order,
     time_decay,
     usb_deviation,
@@ -21,6 +24,10 @@ from graph_repository import AlertRecord
 
 UC1_DETECTOR = "uc1_exfiltration_motif"
 UC1_MIN_CONTINUITY = 0.60
+UC2_DETECTOR = "uc2_credential_pivot_motif"
+UC2_MIN_MACHINE_RISK = 0.60
+UC2_MIN_KEYLOGGER_BRIDGE = 0.40
+UC2_MIN_CONTINUITY = 0.50
 SECONDS_PER_DAY = 24 * 60 * 60
 
 
@@ -120,6 +127,121 @@ class UC1Detector:
             event_time=trigger.event_time,
             components=scored.components,
             user_ids=(trigger.user_id,),
+            machine_ids=scored.machine_ids,
+            evidence_event_ids=scored.evidence_event_ids,
+            evidence_start_ts=scored.evidence_start_ts,
+            evidence_end_ts=scored.evidence_end_ts,
+        )
+
+
+class UC2Detector:
+    """Incremental graph score for credential pivot and victim email fan-out motifs."""
+
+    def score(self, trigger: Event, context: Mapping[str, Any]) -> DetectionScore:
+        trigger_record = _trigger_record(trigger)
+        trigger_ts = int(context.get("trigger_ts") or trigger.event_ts)
+        victim_user_id = trigger.user_id
+        target_machine_id = str(context.get("target_machine_id") or context.get("machine_id") or trigger.machine_id)
+        current_recipients = _current_recipients(trigger, context)
+
+        stage_events = [
+            event
+            for event in _normalise_events(context.get("stage_events") or context.get("window_events") or ())
+            if event["event_ts"] <= trigger_ts
+        ]
+        if trigger_record["event_id"] not in {event["event_id"] for event in stage_events}:
+            stage_events.append(trigger_record)
+        stage_events.sort(key=lambda event: (event["event_ts"], event["event_id"]))
+
+        attacker_user_id = _infer_attacker_user(context, stage_events, victim_user_id)
+        source_machine_id = str(context.get("source_machine_id") or _infer_source_machine(stage_events, attacker_user_id, target_machine_id) or "")
+
+        M = _machine_risk_component(context)
+        K, k_evidence = _keylogger_bridge_component(
+            stage_events=stage_events,
+            attacker_user_id=attacker_user_id,
+            source_machine_id=source_machine_id,
+            target_machine_id=target_machine_id,
+            trigger_ts=trigger_ts,
+        )
+        E = email_fanout_deviation(
+            current_email_count=len(current_recipients),
+            current_window_count=int(context.get("current_window_recipient_count") or len(current_recipients)),
+            per_email_history=[int(value) for value in context.get("per_email_history", ())],
+            window_history=[int(value) for value in context.get("window_fanout_history", ())],
+        )
+        R = social_neighborhood_novelty(
+            current=current_recipients,
+            historical=context.get("recipient_history", ()),
+        )
+        C2, c2_evidence = _credential_continuity_component(
+            stage_events=stage_events,
+            k_evidence=k_evidence,
+            attacker_user_id=attacker_user_id,
+            victim_user_id=victim_user_id,
+            target_machine_id=target_machine_id,
+            trigger_ts=trigger_ts,
+            trigger_event_id=trigger.event_id,
+        )
+        components = {"M": M, "K": K, "E": E, "R": R, "C2": C2}
+
+        evidence_events = _ordered_unique_events([*k_evidence.values(), *c2_evidence.values(), trigger_record])
+        evidence_ids = [event["event_id"] for event in evidence_events]
+        historical_recipients = set(context.get("recipient_history", ()))
+        evidence_ids.extend(
+            f"recipient:{recipient}"
+            for recipient in sorted(set(current_recipients) - historical_recipients)
+        )
+        machine_ids = tuple(
+            sorted(
+                {
+                    machine
+                    for machine in [source_machine_id, target_machine_id, *[event.get("machine_id") for event in evidence_events]]
+                    if machine
+                }
+            )
+        )
+        evidence_start_ts = evidence_events[0]["event_ts"] if evidence_events else trigger_ts
+        evidence_end_ts = trigger_ts
+
+        return DetectionScore(
+            score=score_uc2(M=M, K=K, E=E, R=R, C2=C2),
+            components=components,
+            evidence_event_ids=tuple(evidence_ids),
+            machine_ids=machine_ids or (target_machine_id,),
+            evidence_start_ts=evidence_start_ts,
+            evidence_end_ts=evidence_end_ts,
+            baseline_sizes={
+                "recipient_history": len(context.get("recipient_history", ())),
+                "per_email_history": len(context.get("per_email_history", ())),
+                "window_fanout_history": len(context.get("window_fanout_history", ())),
+            },
+        )
+
+    def evaluate(self, trigger: Event, context: Mapping[str, Any], threshold: float) -> AlertRecord | None:
+        scored = self.score(trigger, context)
+        if scored.components["M"] < UC2_MIN_MACHINE_RISK:
+            return None
+        if scored.components["K"] < UC2_MIN_KEYLOGGER_BRIDGE:
+            return None
+        if scored.components["C2"] < UC2_MIN_CONTINUITY:
+            return None
+        if scored.score < threshold:
+            return None
+
+        attacker_user_id = str(context.get("attacker_user_id") or "")
+        user_ids = tuple(user_id for user_id in (attacker_user_id, trigger.user_id) if user_id)
+        if not user_ids:
+            user_ids = (trigger.user_id,)
+        return AlertRecord(
+            alert_id=f"{UC2_DETECTOR}|{trigger.event_id}",
+            detector=UC2_DETECTOR,
+            score=scored.score,
+            threshold=threshold,
+            trigger_event_id=trigger.event_id,
+            event_time=trigger.event_time,
+            components=scored.components,
+            user_ids=tuple(dict.fromkeys(user_ids)),
             machine_ids=scored.machine_ids,
             evidence_event_ids=scored.evidence_event_ids,
             evidence_start_ts=scored.evidence_start_ts,
@@ -306,6 +428,213 @@ def _continuity_component(
     execution_score = execution_coverage * order * time_decay(duration, 8 * 60 * 60)
     intent_score = intent_coverage * time_decay(max(0, trigger_ts - min(event["event_ts"] for event in stage_events)), 30 * SECONDS_PER_DAY)
     return min(execution_score, intent_score)
+
+
+def _machine_risk_component(context: Mapping[str, Any]) -> float:
+    owner_confidence = float(context.get("owner_confidence", 1.0))
+    probability = context.get("user_machine_probability")
+    if probability is None:
+        machine_use = context.get("machine_use") or {}
+        count = float(machine_use.get("count", 0.0) or 0.0)
+        total = float(machine_use.get("total_count", 0.0) or 0.0)
+        probability = count / total if total > 0 else 0.0
+    return max(0.0, min(1.0, (1.0 - float(probability)) * owner_confidence))
+
+
+def _keylogger_bridge_component(
+    *,
+    stage_events: Sequence[Mapping[str, Any]],
+    attacker_user_id: str | None,
+    source_machine_id: str,
+    target_machine_id: str,
+    trigger_ts: int,
+) -> tuple[float, dict[str, dict[str, Any]]]:
+    attacker_events = [
+        event
+        for event in stage_events
+        if event.get("user_id") == attacker_user_id and event["event_ts"] <= trigger_ts
+    ]
+    q_event = _first_matching(attacker_events, lambda event: _has_keylogger_or_download_signal(event))
+    source_usb = _first_matching(
+        attacker_events,
+        lambda event: event.get("kind") == "DEVICE_CONNECT" and event.get("machine_id") == source_machine_id,
+    )
+    file_event = _first_matching(attacker_events, lambda event: _is_executable_filecopy(event))
+    pivot_event = _first_matching(
+        attacker_events,
+        lambda event: event.get("kind") == "LOGON" and event.get("machine_id") == target_machine_id,
+    )
+    target_usb = _first_matching(
+        attacker_events,
+        lambda event: event.get("kind") == "DEVICE_CONNECT" and event.get("machine_id") == target_machine_id,
+    )
+    evidence = {
+        key: event
+        for key, event in {
+            "q": q_event,
+            "s": source_usb,
+            "f": file_event,
+            "p": pivot_event,
+            "t": target_usb,
+        }.items()
+        if event
+    }
+    if not evidence:
+        return 0.0, {}
+
+    coverage = weighted_coverage(
+        {
+            "q": q_event is not None,
+            "s": source_usb is not None,
+            "f": file_event is not None,
+            "p": pivot_event is not None,
+            "t": target_usb is not None,
+        },
+        {"q": 0.25, "s": 0.15, "f": 0.20, "p": 0.25, "t": 0.15},
+    )
+    order = temporal_order(
+        [
+            (_event_ts(q_event), _event_ts(source_usb)),
+            (_event_ts(source_usb), _event_ts(file_event)),
+            (_event_ts(file_event), _event_ts(pivot_event)),
+            (_event_ts(pivot_event), _event_ts(target_usb)),
+            (_event_ts(pivot_event), trigger_ts),
+            (_event_ts(target_usb), trigger_ts),
+        ]
+    )
+    if pivot_event and any(
+        event and event["event_ts"] > pivot_event["event_ts"]
+        for event in (q_event, source_usb, file_event)
+    ):
+        order *= 0.35
+    duration = max(0, trigger_ts - min(event["event_ts"] for event in evidence.values()))
+    return coverage * order * time_decay(duration, 48 * 60 * 60), evidence
+
+
+def _credential_continuity_component(
+    *,
+    stage_events: Sequence[Mapping[str, Any]],
+    k_evidence: Mapping[str, Mapping[str, Any]],
+    attacker_user_id: str | None,
+    victim_user_id: str,
+    target_machine_id: str,
+    trigger_ts: int,
+    trigger_event_id: str,
+) -> tuple[float, dict[str, dict[str, Any]]]:
+    if not attacker_user_id or attacker_user_id == victim_user_id:
+        return 0.0, {}
+    victim_logon = _first_matching(
+        stage_events,
+        lambda event: event.get("user_id") == victim_user_id
+        and event.get("kind") == "LOGON"
+        and event.get("machine_id") == target_machine_id,
+    )
+    trigger_event = _first_matching(stage_events, lambda event: event.get("event_id") == trigger_event_id)
+    source_compromise = any(key in k_evidence for key in ("q", "s", "f"))
+    target_pivot = any(key in k_evidence for key in ("p", "t"))
+    victim_email = trigger_event is not None and trigger_event.get("kind") == "EMAIL"
+    hop_coverage = sum([source_compromise, target_pivot, victim_email]) / 3.0
+    if hop_coverage == 0.0:
+        return 0.0, {}
+    first_source = min(
+        [event for key, event in k_evidence.items() if key in {"q", "s", "f"}],
+        key=lambda event: event["event_ts"],
+        default=None,
+    )
+    first_target = min(
+        [event for key, event in k_evidence.items() if key in {"p", "t"}],
+        key=lambda event: event["event_ts"],
+        default=None,
+    )
+    order = temporal_order(
+        [
+            (_event_ts(first_source), _event_ts(first_target)),
+            (_event_ts(first_target), _event_ts(victim_logon)),
+            (_event_ts(victim_logon), trigger_ts),
+            (_event_ts(first_target), trigger_ts),
+        ]
+    )
+    if order == 0.0:
+        return 0.0, {}
+    evidence = {
+        key: dict(event)
+        for key, event in {
+            "source": first_source,
+            "target": first_target,
+            "victim_logon": victim_logon,
+            "trigger": trigger_event,
+        }.items()
+        if event
+    }
+    duration = max(0, trigger_ts - min(event["event_ts"] for event in evidence.values()))
+    return hop_coverage * order * time_decay(duration, 48 * 60 * 60), evidence
+
+
+def _current_recipients(trigger: Event, context: Mapping[str, Any]) -> tuple[str, ...]:
+    recipients = context.get("current_recipients")
+    if recipients is None:
+        recipients = trigger.properties.get("recipients", ())
+    return tuple(str(recipient) for recipient in recipients)
+
+
+def _infer_attacker_user(
+    context: Mapping[str, Any],
+    stage_events: Sequence[Mapping[str, Any]],
+    victim_user_id: str,
+) -> str | None:
+    if context.get("attacker_user_id"):
+        return str(context["attacker_user_id"])
+    for event in stage_events:
+        user_id = event.get("user_id")
+        if user_id and user_id != victim_user_id and event.get("kind") in {"HTTP", "DEVICE_CONNECT", "FILE_COPY", "LOGON"}:
+            return str(user_id)
+    return None
+
+
+def _infer_source_machine(
+    stage_events: Sequence[Mapping[str, Any]],
+    attacker_user_id: str | None,
+    target_machine_id: str,
+) -> str | None:
+    for event in stage_events:
+        if event.get("user_id") == attacker_user_id and event.get("machine_id") != target_machine_id:
+            return str(event.get("machine_id"))
+    return None
+
+
+def _first_matching(
+    events: Sequence[Mapping[str, Any]],
+    predicate,
+) -> dict[str, Any] | None:
+    matching = [event for event in events if predicate(event)]
+    return min(matching, key=lambda event: (event["event_ts"], event["event_id"]), default=None)
+
+
+def _has_keylogger_or_download_signal(event: Mapping[str, Any]) -> bool:
+    if event.get("kind") != "HTTP":
+        return False
+    return bool(
+        event.get("keylogger_signal")
+        or event.get("download_signal")
+        or _contains_keyword(event.get("url"), {"keylog", ".exe", "download"})
+        or _contains_keyword(event.get("domain"), {"keylog", "download"})
+    )
+
+
+def _is_executable_filecopy(event: Mapping[str, Any]) -> bool:
+    if event.get("kind") != "FILE_COPY":
+        return False
+    extension = str(event.get("extension") or "").lower()
+    filename = str(event.get("filename") or "").lower()
+    return extension in {".exe", ".dll", ".bat", ".ps1"} or filename.endswith((".exe", ".dll", ".bat", ".ps1"))
+
+
+def _ordered_unique_events(events: Iterable[Mapping[str, Any] | None]) -> list[dict[str, Any]]:
+    by_id = {}
+    for event in events:
+        if event:
+            by_id[event["event_id"]] = dict(event)
+    return sorted(by_id.values(), key=lambda event: (event["event_ts"], event["event_id"]))
 
 
 def _ordered_evidence(

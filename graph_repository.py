@@ -272,10 +272,11 @@ RETURN {
 
 _UC2_CONTEXT_QUERY = """
 MATCH (u:User {id: $user_id})
+OPTIONAL MATCH (trigger_machine:Machine {id: $machine_id})
 OPTIONAL MATCH (u)-[:ACTED]->(history_event:Event)
 WHERE history_event.event_ts >= $history_start_ts
   AND history_event.event_ts < $trigger_ts
-WITH u, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
+WITH u, trigger_machine, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
     event_id: history_event.id,
     source: history_event.source,
     kind: history_event.kind,
@@ -296,48 +297,131 @@ WITH u, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
     size: history_event.size,
     attachments: history_event.attachments
 } END) AS raw_history_events
-WITH u, [event IN raw_history_events WHERE event IS NOT NULL] AS history_events
+WITH u, trigger_machine, [event IN raw_history_events WHERE event IS NOT NULL] AS history_events
 OPTIONAL MATCH (u)-[emailed:EMAILED]->(address:EmailAddress)
 WHERE emailed.first_seen < $trigger_ts
-WITH u, history_events, collect(address.address) AS recipient_history
-OPTIONAL MATCH (u)-[used:USED_MACHINE]->(trigger_machine:Machine {id: $machine_id})
-WITH u, history_events, recipient_history, used
-OPTIONAL MATCH (u)-[:ACTED]->(candidate_event:Event)
-WHERE candidate_event.event_ts >= $window_start_ts
-  AND candidate_event.event_ts <= $trigger_ts
-WITH u, history_events, recipient_history, used, collect(CASE WHEN candidate_event IS NULL THEN NULL ELSE {
-    event_id: candidate_event.id,
-    source: candidate_event.source,
-    kind: candidate_event.kind,
-    user_id: candidate_event.user_id,
-    event_ts: candidate_event.event_ts,
-    machine_id: candidate_event.machine_id,
-    activity: candidate_event.activity,
-    filename: candidate_event.filename,
-    extension: candidate_event.extension,
-    domain: candidate_event.domain,
-    url: candidate_event.url,
-    keylogger_signal: candidate_event.keylogger_signal,
-    job_signal: candidate_event.job_signal,
-    leak_signal: candidate_event.leak_signal,
-    cloud_signal: candidate_event.cloud_signal,
-    recipient_count: candidate_event.recipient_count,
-    recipients: candidate_event.recipients,
-    size: candidate_event.size,
-    attachments: candidate_event.attachments
-} END) AS raw_window_events
-WITH u, history_events, recipient_history, used, [event IN raw_window_events WHERE event IS NOT NULL] AS window_events
+WITH u, trigger_machine, history_events, collect(address.address) AS recipient_history
+OPTIONAL MATCH (u)-[used:USED_MACHINE]->(trigger_machine)
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     coalesce(used.count, 0) AS victim_machine_count
+OPTIONAL MATCH (u)-[all_used:USED_MACHINE]->(:Machine)
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     sum(coalesce(all_used.count, 0)) AS victim_total_machine_count
+OPTIONAL MATCH (owner:User)-[owner_used:USED_MACHINE]->(trigger_machine)
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     victim_total_machine_count,
+     owner,
+     owner_used
+ORDER BY coalesce(owner_used.count, 0) DESC
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     victim_total_machine_count,
+     collect({user_id: owner.id, count: coalesce(owner_used.count, 0)}) AS machine_owners,
+     sum(coalesce(owner_used.count, 0)) AS machine_total_count
+OPTIONAL MATCH (attacker:User)-[:ACTED]->(stage_event:Event)-[:ON_MACHINE]->(stage_machine:Machine)
+WHERE attacker.id <> u.id
+  AND stage_event.event_ts >= $window_start_ts
+  AND stage_event.event_ts <= $trigger_ts
+  AND (
+      stage_machine.id = $machine_id
+      OR stage_event.keylogger_signal = true
+      OR stage_event.kind IN ['HTTP', 'DEVICE_CONNECT', 'FILE_COPY', 'LOGON']
+  )
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     victim_total_machine_count,
+     machine_owners,
+     machine_total_count,
+     collect(CASE WHEN stage_event IS NULL THEN NULL ELSE {
+         event_id: stage_event.id,
+         source: stage_event.source,
+         kind: stage_event.kind,
+         user_id: attacker.id,
+         event_ts: stage_event.event_ts,
+         machine_id: stage_machine.id,
+         activity: stage_event.activity,
+         filename: stage_event.filename,
+         extension: stage_event.extension,
+         domain: stage_event.domain,
+         url: stage_event.url,
+         keylogger_signal: stage_event.keylogger_signal,
+         download_signal: stage_event.download_signal,
+         job_signal: stage_event.job_signal,
+         leak_signal: stage_event.leak_signal,
+         cloud_signal: stage_event.cloud_signal,
+         recipient_count: stage_event.recipient_count,
+         recipients: stage_event.recipients,
+         size: stage_event.size,
+         attachments: stage_event.attachments
+     } END) AS raw_stage_events
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     victim_total_machine_count,
+     machine_owners,
+     machine_total_count,
+     [event IN raw_stage_events WHERE event IS NOT NULL] AS stage_events
+WITH u,
+     trigger_machine,
+     history_events,
+     recipient_history,
+     used,
+     victim_machine_count,
+     victim_total_machine_count,
+     machine_owners,
+     machine_total_count,
+     stage_events,
+     [event IN stage_events WHERE event.user_id <> u.id | event.user_id] AS attacker_ids
 RETURN {
     user_id: u.id,
     machine_id: $machine_id,
+    target_machine_id: $machine_id,
+    attacker_user_id: CASE WHEN size(attacker_ids) = 0 THEN NULL ELSE attacker_ids[0] END,
+    owner_confidence: CASE
+        WHEN machine_total_count IS NULL OR machine_total_count = 0 THEN 0.0
+        ELSE toFloat(machine_owners[0].count) / machine_total_count
+    END,
+    user_machine_probability: CASE
+        WHEN victim_total_machine_count IS NULL OR victim_total_machine_count = 0 THEN 0.0
+        ELSE toFloat(victim_machine_count) / victim_total_machine_count
+    END,
     history_start_ts: $history_start_ts,
     window_start_ts: $window_start_ts,
     trigger_ts: $trigger_ts,
     history_events: history_events,
-    window_events: window_events,
+    stage_events: stage_events,
+    window_events: stage_events,
+    per_email_history: [event IN history_events WHERE event.kind = 'EMAIL' | coalesce(event.recipient_count, 0)],
+    window_fanout_history: [event IN history_events WHERE event.kind = 'EMAIL' AND event.event_ts >= $trigger_ts - 600 | coalesce(event.recipient_count, 0)],
     recipient_history: recipient_history,
     machine_use: {
         count: coalesce(used.count, 0),
+        total_count: coalesce(victim_total_machine_count, 0),
         first_seen: used.first_seen,
         last_seen: used.last_seen
     }

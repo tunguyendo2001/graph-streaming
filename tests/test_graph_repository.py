@@ -259,9 +259,14 @@ class GraphRepositoryTest(unittest.TestCase):
         self.assertIn("window_start_ts", uc2.params)
         self.assertIn("window_events", uc2.query)
         self.assertIn("machine_use", uc2.query)
-        self.assertIn("candidate_event.event_ts >= $window_start_ts", uc2.query)
+        self.assertIn("stage_events", uc2.query)
+        self.assertIn("attacker_user_id", uc2.query)
+        self.assertIn("owner_confidence", uc2.query)
+        self.assertIn("user_machine_probability", uc2.query)
+        self.assertIn("attacker.id <> u.id", uc2.query)
+        self.assertIn("stage_event.event_ts >= $window_start_ts", uc2.query)
         self.assertIn("emailed.first_seen < $trigger_ts", uc2.query)
-        self.assertIn("recipients: candidate_event.recipients", uc2.query)
+        self.assertIn("recipients: stage_event.recipients", uc2.query)
 
     def test_upsert_alert_merges_alert_with_components_and_evidence_metadata(self):
         from graph_repository import AlertRecord

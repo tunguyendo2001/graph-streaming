@@ -4,7 +4,7 @@ from pathlib import Path
 
 from baselines import logon_hour_anomaly
 from event_model import Event
-from graph_detectors import UC1Detector
+from graph_detectors import UC1Detector, UC2Detector
 
 
 def dt(year, month, day, hour, minute=0):
@@ -42,6 +42,25 @@ def trigger(kind="HTTP", event_id="http-trigger", event_time=None, **properties)
         user_id="U001",
         machine_id="PC-1",
         properties=defaults,
+    )
+
+
+def email_trigger(recipients=None, event_time=None):
+    recipients = tuple(recipients or [f"new{i}@external.example" for i in range(11)])
+    event_time = event_time or dt(2010, 2, 1, 15, 0)
+    return Event(
+        event_id="email-final",
+        source="email",
+        kind="EMAIL",
+        event_time=event_time,
+        user_id="FAW0032",
+        machine_id="PC-5866",
+        properties={
+            "recipients": recipients,
+            "recipient_count": len(recipients),
+            "size": 50_000,
+            "attachments": 0,
+        },
     )
 
 
@@ -99,6 +118,90 @@ def full_uc1_candidates(machine_id="PC-1", *, logon_minute=0, usb_minute=5, file
         )
     )
     return events
+
+
+def uc2_stage_events(*, pivot_before_keylogger=False, attacker_user_id="BBS0039"):
+    keylogger_ts = ts(2010, 2, 1, 10, 0)
+    source_usb_ts = ts(2010, 2, 1, 10, 5)
+    source_file_ts = ts(2010, 2, 1, 10, 10)
+    pivot_ts = ts(2010, 2, 1, 13, 0)
+    if pivot_before_keylogger:
+        pivot_ts = ts(2010, 2, 1, 9, 0)
+    return [
+        event_dict(
+            "bbs-keylogger",
+            "HTTP",
+            keylogger_ts,
+            user_id=attacker_user_id,
+            machine_id="PC-9436",
+            domain="keylogger.example",
+            keylogger_signal=True,
+        ),
+        event_dict(
+            "bbs-usb-source",
+            "DEVICE_CONNECT",
+            source_usb_ts,
+            user_id=attacker_user_id,
+            machine_id="PC-9436",
+            activity="CONNECT",
+        ),
+        event_dict(
+            "bbs-copy-exe",
+            "FILE_COPY",
+            source_file_ts,
+            user_id=attacker_user_id,
+            machine_id="PC-9436",
+            filename="collector.exe",
+            extension=".exe",
+        ),
+        event_dict(
+            "bbs-logon-target",
+            "LOGON",
+            pivot_ts,
+            user_id=attacker_user_id,
+            machine_id="PC-5866",
+            activity="LOGON",
+        ),
+        event_dict(
+            "bbs-usb-target",
+            "DEVICE_CONNECT",
+            ts(2010, 2, 1, 13, 5),
+            user_id=attacker_user_id,
+            machine_id="PC-5866",
+            activity="CONNECT",
+        ),
+        event_dict(
+            "faw-logon-target",
+            "LOGON",
+            ts(2010, 2, 1, 14, 40),
+            user_id="FAW0032",
+            machine_id="PC-5866",
+            activity="LOGON",
+        ),
+    ]
+
+
+def uc2_context(*, recipients=None, stage_events=None, owner_confidence=1.0, user_machine_probability=0.0, attacker_user_id="BBS0039"):
+    event = email_trigger(recipients=recipients)
+    recipients = tuple(event.properties["recipients"])
+    old_recipients = recipients[:3]
+    return {
+        "user_id": "FAW0032",
+        "machine_id": "PC-5866",
+        "trigger_ts": event.event_ts,
+        "window_start_ts": event.event_ts - 48 * 60 * 60,
+        "attacker_user_id": attacker_user_id,
+        "source_machine_id": "PC-9436",
+        "target_machine_id": "PC-5866",
+        "owner_confidence": owner_confidence,
+        "user_machine_probability": user_machine_probability,
+        "stage_events": list(stage_events if stage_events is not None else uc2_stage_events(attacker_user_id=attacker_user_id)),
+        "recipient_history": list(old_recipients),
+        "current_recipients": list(recipients),
+        "per_email_history": [2, 2, 3, 3, 4],
+        "window_fanout_history": [4, 4, 5, 5, 6],
+        "current_window_recipient_count": len(recipients),
+    }
 
 
 class UC1DetectorTest(unittest.TestCase):
@@ -228,6 +331,111 @@ class UC1EvidenceQueryTest(unittest.TestCase):
         self.assertIn(":VISITED", query)
         self.assertIn("history_events", query)
         self.assertIn("candidate_events", query)
+
+
+class UC2DetectorTest(unittest.TestCase):
+    def test_final_mass_email_after_attacker_machine_bridge_alerts(self):
+        detector = UC2Detector()
+        event = email_trigger()
+        context = uc2_context()
+
+        alert = detector.evaluate(event, context, threshold=0.75)
+
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert.detector, "uc2_credential_pivot_motif")
+        self.assertEqual(alert.user_ids, ("BBS0039", "FAW0032"))
+        self.assertEqual(alert.machine_ids, ("PC-5866", "PC-9436"))
+        self.assertGreaterEqual(alert.score, 0.75)
+        self.assertGreaterEqual(alert.components["M"], 0.90)
+        self.assertGreaterEqual(alert.components["K"], 0.60)
+        self.assertEqual(alert.components["E"], 1.0)
+        self.assertGreaterEqual(alert.components["C2"], 0.50)
+        self.assertIn("bbs-keylogger", alert.evidence_event_ids)
+        self.assertIn("email-final", alert.evidence_event_ids)
+        self.assertIn("recipient:new10@external.example", alert.evidence_event_ids)
+
+    def test_shared_machine_with_low_owner_confidence_reduces_m_below_gate(self):
+        detector = UC2Detector()
+        event = email_trigger()
+        context = uc2_context(owner_confidence=0.50)
+
+        score = detector.score(event, context)
+
+        self.assertEqual(score.components["M"], 0.50)
+        self.assertIsNone(detector.evaluate(event, context, threshold=0.0))
+
+    def test_mass_email_without_attacker_victim_machine_bridge_does_not_alert(self):
+        detector = UC2Detector()
+        event = email_trigger()
+        context = uc2_context(stage_events=[])
+
+        score = detector.score(event, context)
+
+        self.assertEqual(score.components["K"], 0.0)
+        self.assertEqual(score.components["C2"], 0.0)
+        self.assertIsNone(detector.evaluate(event, context, threshold=0.0))
+
+    def test_k_decreases_when_pivot_precedes_keylogger_and_usb_stages(self):
+        detector = UC2Detector()
+        event = email_trigger()
+        ordered = detector.score(event, uc2_context())
+        reordered = detector.score(
+            event,
+            uc2_context(stage_events=uc2_stage_events(pivot_before_keylogger=True)),
+        )
+
+        self.assertLess(reordered.components["K"], ordered.components["K"])
+        self.assertLess(reordered.components["K"], 0.40)
+        self.assertIsNone(
+            detector.evaluate(
+                event,
+                uc2_context(stage_events=uc2_stage_events(pivot_before_keylogger=True)),
+                threshold=0.0,
+            )
+        )
+
+    def test_recipient_novelty_is_fraction_outside_social_neighborhood(self):
+        detector = UC2Detector()
+        event = email_trigger()
+
+        score = detector.score(event, uc2_context())
+
+        self.assertAlmostEqual(score.components["R"], 8 / 11)
+
+    def test_same_attacker_and_victim_zeroes_identity_bridge(self):
+        detector = UC2Detector()
+        event = Event(
+            event_id="email-final",
+            source="email",
+            kind="EMAIL",
+            event_time=dt(2010, 2, 1, 15, 0),
+            user_id="FAW0032",
+            machine_id="PC-5866",
+            properties={
+                "recipients": tuple(f"new{i}@external.example" for i in range(11)),
+                "recipient_count": 11,
+            },
+        )
+        context = uc2_context(attacker_user_id="FAW0032", stage_events=uc2_stage_events(attacker_user_id="FAW0032"))
+
+        score = detector.score(event, context)
+
+        self.assertEqual(score.components["C2"], 0.0)
+        self.assertIsNone(detector.evaluate(event, context, threshold=0.0))
+
+
+class UC2EvidenceQueryTest(unittest.TestCase):
+    def test_query_contains_identity_bridge_and_email_neighborhood_terms(self):
+        query = Path("queries/uc2_evidence.cypher").read_text(encoding="utf-8")
+
+        self.assertIn("MATCH (victim:User {id: $user_id})", query)
+        self.assertIn("target_machine:Machine {id: $machine_id}", query)
+        self.assertIn("attacker.id <> victim.id", query)
+        self.assertIn("keylogger_signal", query)
+        self.assertIn(":USED_MACHINE", query)
+        self.assertIn(":EMAILED", query)
+        self.assertIn("recipient_history", query)
+        self.assertIn("current_recipients", query)
 
 
 if __name__ == "__main__":
