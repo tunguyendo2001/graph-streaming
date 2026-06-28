@@ -1,109 +1,129 @@
 import argparse
-import csv
+import json
 import os
 import sys
-import time
+import tempfile
 from pathlib import Path
 
 from neo4j import GraphDatabase
 
-from cert_pipeline import build_cypher_payload, format_stream_log
+from event_replay import ReplayConfig, ReplayEngine
+from graph_detectors import UC1Detector, UC2Detector
+from graph_repository import GraphRepository
 
 
 def configure_console_encoding() -> None:
-    """
-    Đảm bảo log tiếng Việt in được trên Windows console.
-    """
+    if os.name != "nt":
+        return
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def build_auth():
-    """
-    Memgraph local thường không bật auth. Nếu bật auth, set biến môi trường.
-    """
     user = os.getenv("MEMGRAPH_USER", "")
     password = os.getenv("MEMGRAPH_PASSWORD", "")
     if user or password:
-        return user, password
+        return (user, password)
     return None
 
 
-def execute_write(session, callback, payload):
-    """
-    Tương thích neo4j-driver v4/v5.
-    """
-    if hasattr(session, "execute_write"):
-        return session.execute_write(callback, payload)
-    return session.write_transaction(callback, payload)
+def limited_stream_copy(stream_path: Path, limit: int | None) -> tuple[Path, Path | None]:
+    if limit is None:
+        return stream_path, None
+    if limit <= 0:
+        raise ValueError("--limit must be positive when provided")
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl", delete=False)
+    copied = 0
+    with handle:
+        with stream_path.open("r", encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                handle.write(line)
+                copied += 1
+                if copied >= limit:
+                    break
+    return Path(handle.name), Path(handle.name)
 
 
-def write_event(tx, row: dict) -> None:
-    """
-    Chọn Cypher theo event_type rồi ghi một event vào Memgraph.
-    """
-    query, params = build_cypher_payload(row)
-    tx.run(query, **params).consume()
+def replay_cert_stream(
+    *,
+    stream_path: Path,
+    uri: str,
+    reset: bool,
+    delay: float,
+    limit: int | None,
+    calibration_days: int,
+    allowed_lateness_seconds: int,
+    summary_path: Path,
+) -> dict:
+    if not stream_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy JSONL stream: {stream_path.resolve()}")
 
-
-def stream_cert_events(csv_path: Path, uri: str, delay: float, reset: bool, limit: int | None) -> None:
-    """
-    Stream clean_cert_stream.csv vào Memgraph theo từng dòng.
-    """
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file stream sạch: {csv_path.resolve()}")
-
+    replay_path, temporary_path = limited_stream_copy(stream_path, limit)
     driver = GraphDatabase.driver(uri, auth=build_auth())
-
     try:
-        driver.verify_connectivity()
-        print(f"[STREAM] Đã kết nối Memgraph tại {uri}")
-
-        with driver.session() as session:
-            if reset:
-                print("[STREAM] Xóa graph cũ trước khi stream...")
-                session.run("MATCH (n) DETACH DELETE n").consume()
-
-            with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
-                reader = csv.DictReader(file)
-                for row_number, row in enumerate(reader, start=1):
-                    if limit is not None and row_number > limit:
-                        break
-
-                    try:
-                        execute_write(session, write_event, row)
-                        print(format_stream_log(row))
-                        time.sleep(delay)
-                    except Exception as row_error:
-                        print(f"[ERROR] Lỗi tại dòng {row_number}: {row_error}")
-
-    except Exception as error:
-        print(f"[FATAL] Không thể stream CERT vào Memgraph: {error}")
-        raise
+        repository = GraphRepository(driver, database=os.getenv("MEMGRAPH_DATABASE") or None)
+        if reset:
+            print("[STREAM] Xóa graph cũ trước khi replay...")
+            repository.reset()
+        config = ReplayConfig(
+            calibration_days=calibration_days,
+            allowed_lateness_seconds=allowed_lateness_seconds,
+            delay_seconds=delay,
+            uc1_fallback_threshold=float(os.getenv("UC1_FALLBACK_THRESHOLD", "0.75")),
+            uc2_fallback_threshold=float(os.getenv("UC2_FALLBACK_THRESHOLD", "0.75")),
+            prune_after_days=int(os.getenv("PRUNE_AFTER_DAYS", "90")),
+        )
+        engine = ReplayEngine(repository, UC1Detector(), UC2Detector(), config)
+        summary = engine.replay(replay_path).to_dict()
     finally:
         driver.close()
-        print("[STREAM] Đã đóng kết nối Memgraph.")
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stream clean_cert_stream.csv vào Memgraph.")
-    parser.add_argument("--csv", default=os.getenv("CERT_STREAM_CSV", "clean_cert_stream.csv"))
+    configure_console_encoding()
+    parser = argparse.ArgumentParser(description="Replay CERT r4.2 JSONL stream vào Memgraph và chạy graph detectors.")
+    parser.add_argument("--stream", default=os.getenv("CERT_STREAM_JSONL", "artifacts/evaluation_stream.jsonl"))
     parser.add_argument("--uri", default=os.getenv("MEMGRAPH_URI", "bolt://localhost:7687"))
-    parser.add_argument("--delay", type=float, default=float(os.getenv("CERT_STREAM_DELAY_SECONDS", "0.04")))
-    parser.add_argument("--reset", action="store_true", help="Xóa graph hiện tại trước khi stream.")
-    parser.add_argument("--limit", type=int, default=None, help="Giới hạn số dòng stream khi demo nhanh.")
+    parser.add_argument("--reset", action="store_true", help="Xóa graph hiện tại trước khi replay.")
+    parser.add_argument("--delay", type=float, default=float(os.getenv("CERT_STREAM_DELAY_SECONDS", "0")))
+    parser.add_argument("--limit", type=int, default=None, help="Giới hạn số event replay khi demo nhanh.")
+    parser.add_argument("--calibration-days", type=int, default=int(os.getenv("CALIBRATION_DAYS", "30")))
+    parser.add_argument(
+        "--allowed-lateness-seconds",
+        type=int,
+        default=int(os.getenv("ALLOWED_LATENESS_SECONDS", "300")),
+    )
+    parser.add_argument("--summary", default=os.getenv("REPLAY_SUMMARY_JSON", "artifacts/replay_summary.json"))
     args = parser.parse_args()
 
-    stream_cert_events(
-        csv_path=Path(args.csv),
+    summary = replay_cert_stream(
+        stream_path=Path(args.stream),
         uri=args.uri,
-        delay=args.delay,
         reset=args.reset,
+        delay=args.delay,
         limit=args.limit,
+        calibration_days=args.calibration_days,
+        allowed_lateness_seconds=args.allowed_lateness_seconds,
+        summary_path=Path(args.summary),
     )
+    print(
+        "[STREAM] done "
+        f"processed={summary['processed_events']} "
+        f"alerts={summary['alerts_persisted']} "
+        f"duplicates={summary['duplicate_events']} "
+        f"thresholds={summary['thresholds']}"
+    )
+    print(f"[STREAM] summary={Path(args.summary).resolve()}")
 
 
 if __name__ == "__main__":
-    configure_console_encoding()
     main()
