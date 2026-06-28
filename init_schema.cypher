@@ -1,5 +1,10 @@
-// Tạo index giúp MERGE node nhanh hơn khi stream dữ liệu CERT vào Memgraph.
 CREATE INDEX ON :User(id);
 CREATE INDEX ON :Machine(id);
-CREATE INDEX ON :File(id);
-CREATE INDEX ON :Device(id);
+CREATE INDEX ON :Event(id);
+CREATE INDEX ON :Event(event_ts);
+CREATE INDEX ON :Domain(name);
+CREATE INDEX ON :EmailAddress(address);
+CREATE INDEX ON :ActivityWindow(id);
+CREATE INDEX ON :UsbSession(id);
+CREATE INDEX ON :Alert(id);
+CREATE INDEX ON :Alert(detector);
