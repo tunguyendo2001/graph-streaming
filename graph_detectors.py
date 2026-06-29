@@ -43,7 +43,11 @@ class DetectionScore:
 
 
 class UC1Detector:
-    """Incremental graph score for LOGON -> USB -> FILE_COPY -> external domain motifs."""
+    """
+    Incremental graph score for LOGON -> USB -> FILE_COPY -> external domain motifs.
+
+    S1 = 0.20A + 0.25U + 0.25F + 0.15D + 0.15C1.
+    """
 
     def score(self, trigger: Event, context: Mapping[str, Any]) -> DetectionScore:
         trigger_record = _trigger_record(trigger)
@@ -135,7 +139,11 @@ class UC1Detector:
 
 
 class UC2Detector:
-    """Incremental graph score for credential pivot and victim email fan-out motifs."""
+    """
+    Incremental graph score for credential pivot and victim email fan-out motifs.
+
+    S2 = 0.25M + 0.25K + 0.20E + 0.15R + 0.15C2.
+    """
 
     def score(self, trigger: Event, context: Mapping[str, Any]) -> DetectionScore:
         trigger_record = _trigger_record(trigger)
