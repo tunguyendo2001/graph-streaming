@@ -120,6 +120,8 @@ def main() -> None:
         f"processed={summary['processed_events']} "
         f"alerts={summary['alerts_persisted']} "
         f"duplicates={summary['duplicate_events']} "
+        f"eps={summary['throughput_events_per_second']:.1f} "
+        f"rss_mb={summary['peak_python_rss_mb']:.1f} "
         f"thresholds={summary['thresholds']}"
     )
     print(f"[STREAM] summary={Path(args.summary).resolve()}")

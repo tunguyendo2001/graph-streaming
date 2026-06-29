@@ -2,6 +2,8 @@ services:
   memgraph-platform:
     image: memgraph/memgraph-platform:latest
     container_name: memgraph-platform
+    mem_limit: 6g
+    memswap_limit: 6g
     ports:
       - "7687:7687" # Bolt protocol: Python neo4j driver kết nối vào đây
       - "7444:7444" # Log endpoint để Memgraph Lab đọc log

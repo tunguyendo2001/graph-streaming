@@ -228,6 +228,7 @@ class ReplayEngineTest(unittest.TestCase):
         self.assertEqual(summary.processed_events, 1)
         self.assertGreaterEqual(summary.processing_seconds, 0.0)
         self.assertGreaterEqual(summary.throughput_events_per_second, 0.0)
+        self.assertGreater(summary.peak_python_rss_mb, 0.0)
 
 
 if __name__ == "__main__":

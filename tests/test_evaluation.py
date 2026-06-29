@@ -1,10 +1,20 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cert_extractor import Incident
-from evaluation import EvaluationAlert, compare_detectors, evaluate_alerts, load_ground_truth
+from event_model import Event
+from evaluation import (
+    EvaluationAlert,
+    compare_detectors,
+    evaluate_alerts,
+    graph_alerts_from_rows,
+    load_ground_truth,
+    main,
+    run_rule_baseline,
+)
 
 
 BASE = datetime(2010, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -27,6 +37,18 @@ def alert(alert_id, detector, user_id, offset, latency=0.0):
         user_id=user_id,
         event_time=BASE + timedelta(seconds=offset),
         processing_latency_seconds=latency,
+    )
+
+
+def stream_event(event_id, kind, offset, user_id="U001", machine_id="PC-001", **properties):
+    return Event(
+        event_id=event_id,
+        source=kind.lower(),
+        kind=kind,
+        event_time=BASE + timedelta(seconds=offset),
+        user_id=user_id,
+        machine_id=machine_id,
+        properties=properties,
     )
 
 
@@ -94,6 +116,98 @@ class EvaluationTest(unittest.TestCase):
 
         self.assertGreater(comparison["recall_delta"], 0)
         self.assertGreater(comparison["f1_delta"], 0)
+
+    def test_rule_baseline_reads_jsonl_stream(self):
+        events = [
+            stream_event("logon-1", "LOGON", -5 * 60 * 60),
+            stream_event("usb-1", "DEVICE_CONNECT", -5 * 60 * 60 + 1),
+            stream_event("file-1", "FILE_COPY", -5 * 60 * 60 + 2),
+            stream_event("file-2", "FILE_COPY", -5 * 60 * 60 + 3),
+            stream_event("email-1", "EMAIL", 4, user_id="U003", recipients=["a", "b", "c"], recipient_count=3),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stream_path = Path(temp_dir) / "stream.jsonl"
+            stream_path.write_text(
+                "\n".join(json.dumps(event.to_record(), sort_keys=True) for event in events),
+                encoding="utf-8",
+            )
+
+            alerts = run_rule_baseline(stream_path, uc1_file_threshold=2, uc2_recipient_threshold=3)
+
+        self.assertTrue(any(item.detector == "rule_uc1" for item in alerts))
+        self.assertTrue(any(item.detector == "rule_uc2" for item in alerts))
+
+    def test_graph_alert_rows_convert_to_evaluation_alerts(self):
+        alerts = graph_alerts_from_rows(
+            [
+                {
+                    "alert_id": "g1",
+                    "detector": "uc1_exfiltration_motif",
+                    "user_ids": ["U001"],
+                    "event_time": BASE.isoformat(),
+                    "processing_latency_seconds": 0.25,
+                }
+            ]
+        )
+
+        self.assertEqual(alerts[0].alert_id, "g1")
+        self.assertEqual(alerts[0].user_id, "U001")
+        self.assertAlmostEqual(alerts[0].processing_latency_seconds, 0.25)
+
+    def test_cli_writes_graph_rule_and_comparison_reports_from_json_alerts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            answers_dir = root / "answers"
+            answers_dir.mkdir()
+            (answers_dir / "insiders.csv").write_text(
+                "\n".join(
+                    [
+                        "dataset,scenario,details,user,start,end",
+                        "4.2,1,r4.2-1/U001.csv,U001,01/01/2010 12:00:00,01/01/2010 12:10:00",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stream_path = root / "stream.jsonl"
+            stream_path.write_text(
+                json.dumps(stream_event("http-1", "HTTP", 5).to_record(), sort_keys=True),
+                encoding="utf-8",
+            )
+            graph_alerts_path = root / "graph_alerts.json"
+            graph_alerts_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "alert_id": "g1",
+                            "detector": "uc1_exfiltration_motif",
+                            "user_ids": ["U001"],
+                            "event_time": "2010-01-01T12:00:05+00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            main(
+                [
+                    "--answers-dir",
+                    str(answers_dir),
+                    "--stream",
+                    str(stream_path),
+                    "--graph-alerts-json",
+                    str(graph_alerts_path),
+                    "--graph-output",
+                    str(root / "graph_metrics.json"),
+                    "--rule-output",
+                    str(root / "rule_metrics.json"),
+                    "--comparison-output",
+                    str(root / "comparison.json"),
+                ]
+            )
+
+            self.assertEqual(json.loads((root / "graph_metrics.json").read_text())["true_positives"], 1)
+            self.assertTrue((root / "rule_metrics.json").exists())
+            self.assertIn("f1_delta", json.loads((root / "comparison.json").read_text()))
 
 
 if __name__ == "__main__":

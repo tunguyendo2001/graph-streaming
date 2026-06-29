@@ -10,6 +10,11 @@ from typing import Any, Iterable, Mapping
 
 from event_model import Event
 
+try:  # pragma: no cover - exercised indirectly when psutil is installed
+    import psutil
+except ImportError:  # pragma: no cover - keeps replay usable in minimal envs
+    psutil = None
+
 
 UC1_TRIGGER_KINDS = {"LOGON", "DEVICE_CONNECT", "FILE_COPY", "HTTP"}
 UC2_TRIGGER_KINDS = {"LOGON", "DEVICE_CONNECT", "FILE_COPY", "HTTP", "EMAIL"}
@@ -38,6 +43,7 @@ class ReplaySummary:
     recomputed_neighborhoods: int = 0
     processing_seconds: float = 0.0
     throughput_events_per_second: float = 0.0
+    peak_python_rss_mb: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +68,7 @@ class ReplayEngine:
             },
             late_events=late_events,
             recomputed_neighborhoods=recomputes,
+            peak_python_rss_mb=_current_rss_mb(),
         )
         calibration_scores: dict[str, list[float]] = {"uc1": [], "uc2": []}
         calibration_end_ts = None
@@ -96,10 +103,13 @@ class ReplayEngine:
             self._prune_if_configured(event)
             if hasattr(self.repository, "update_baselines"):
                 self.repository.update_baselines(event)
+            if summary.processed_events % 1000 == 0:
+                summary.peak_python_rss_mb = max(summary.peak_python_rss_mb, _current_rss_mb())
 
         if not thresholds_frozen:
             _freeze_thresholds(summary.thresholds, calibration_scores, self.config)
 
+        summary.peak_python_rss_mb = max(summary.peak_python_rss_mb, _current_rss_mb())
         summary.processing_seconds = time.perf_counter() - started
         summary.throughput_events_per_second = (
             summary.processed_events / summary.processing_seconds
@@ -209,3 +219,52 @@ def _percentile_995(values: Iterable[float], fallback: float) -> float:
         return fallback
     index = max(0, min(len(sorted_values) - 1, math.ceil(0.995 * len(sorted_values)) - 1))
     return sorted_values[index]
+
+
+def _current_rss_mb() -> float:
+    if psutil is None:
+        return _current_rss_mb_without_psutil()
+    return psutil.Process().memory_info().rss / (1024 * 1024)
+
+
+def _current_rss_mb_without_psutil() -> float:
+    try:
+        import resource
+
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return rss / 1024 if rss > 10_000 else rss / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+        get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_current_process.restype = wintypes.HANDLE
+        get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_process_memory_info.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        get_process_memory_info.restype = wintypes.BOOL
+        ok = get_process_memory_info(get_current_process(), ctypes.byref(counters), counters.cb)
+        return counters.WorkingSetSize / (1024 * 1024) if ok else 0.0
+    except Exception:
+        return 0.0

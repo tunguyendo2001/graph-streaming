@@ -1,94 +1,312 @@
 # CERT r4.2 Streaming Graph Analytics
 
-Demo xử lý đồ thị theo luồng với Python + Memgraph, chỉ dùng dữ liệu thật CERT r4.2 và ground truth trong `data/cert-r4.2/answers/`.
+Project này demo xử lý đồ thị theo luồng với Python + Memgraph, chỉ dùng dữ liệu thật CERT r4.2 và ground truth trong `data/cert-r4.2/answers/`.
 
-Không còn nhánh dữ liệu synthetic/fake. Pipeline hiện tại:
+Không còn dữ liệu fake/synthetic để “ép” demo. Tập đánh giá được dựng từ:
 
-1. `1_prepare_cert_data.py` chọn cohort đánh giá nhẹ tài nguyên: toàn bộ insider thật trong answers + nhóm control thật được match từ lịch sử trước incident.
-2. `cert_extractor.py` trích các event thật `logon/device/file/http/email` thành JSONL đã sort theo `event_ts,event_id`.
-3. `2_stream_cert.py` replay JSONL vào Memgraph, cập nhật temporal graph, chạy UC1/UC2 detectors, lưu alert và summary.
+- 70 insider thật của CERT r4.2 trong `answers/insiders.csv`: scenario 1 có 30, scenario 2 có 30, scenario 3 có 10.
+- Nhóm control thật được match từ lịch sử trước incident, mặc định 2 control / insider.
+- Event thật từ `logon.csv`, `device.csv`, `file.csv`, `http.csv`, `email.csv`.
+
+## Vì sao dùng graph streaming thay rule-based phẳng?
+
+Rule-based truyền thống chỉ nhìn điều kiện cục bộ như “sau giờ làm + có USB + copy nhiều file” hoặc “email nhiều recipient”. Cách đó dễ miss khi hành vi được chia nhỏ theo thời gian, đổi máy, hoặc cần nối nhiều identity.
+
+Graph streaming trong project này làm tốt hơn ở 3 điểm:
+
+1. Mỗi event mới được ghi vào temporal graph ngay khi replay.
+2. Detector chỉ chấm lại neighborhood liên quan đến event mới, không scan toàn bộ CSV.
+3. Alert dựa trên evidence path có thứ tự thời gian, quan hệ user-machine-domain-email, độ mới của cạnh, baseline cá nhân và motif nhiều hop.
+
+Nói ngắn gọn: rule hỏi “event này có vượt ngưỡng không?”, graph hỏi “event này có hoàn tất một chuỗi quan hệ đáng ngờ không?”.
+
+## Kiến trúc pipeline
+
+```text
+CERT r4.2 CSV + answers/
+        |
+        v
+1_prepare_cert_data.py
+  - load 70 insider thật
+  - match control thật
+  - external sort JSONL theo event_ts,event_id
+        |
+        v
+artifacts/evaluation_stream.jsonl
+        |
+        v
+2_stream_cert.py
+  - replay event-time stream
+  - upsert event vào Memgraph
+  - cập nhật baseline / temporal sessions
+  - chạy UC1 + UC2 incremental detectors
+        |
+        v
+Memgraph Alert nodes + artifacts/replay_summary.json
+        |
+        v
+evaluation.py
+  - đọc graph alerts
+  - chạy flat rule baseline trên cùng stream
+  - so sánh với answers/ ground truth
+```
 
 ## Cài đặt
 
-```bash
-pip install -r requirements.txt
-```
-
-Chạy Memgraph:
-
-```bash
+```powershell
+python -m pip install -r requirements.txt
 docker compose up -d
 ```
 
-Khởi tạo schema trong Memgraph Lab bằng `init_schema.cypher`.
+Memgraph Lab chạy ở `http://localhost:3000`, Bolt URI mặc định là `bolt://localhost:7687`.
 
-## Bước 1: tạo evaluation stream từ CERT thật
+Khởi tạo schema bằng cách chạy nội dung `init_schema.cypher` trong Memgraph Lab.
 
-```bash
-python 1_prepare_cert_data.py \
-  --input-dir data/cert-r4.2/r4.2 \
-  --answers-dir data/cert-r4.2/answers \
-  --output artifacts/evaluation_stream.jsonl \
-  --manifest artifacts/cohort.json \
-  --controls-per-insider 2 \
+## Chạy nhanh demo
+
+```powershell
+.\scripts\run_demo.ps1
+```
+
+Script này dùng 1 control / insider, trích stream nhỏ hơn, replay 5.000 event đầu và ghi:
+
+- `artifacts/evaluation_stream.jsonl`
+- `artifacts/cohort.json`
+- `artifacts/replay_summary.json`
+- `artifacts/graph_metrics.json`
+- `artifacts/rule_metrics.json`
+- `artifacts/comparison.json`
+
+Nếu dữ liệu CERT nằm ngoài repo hiện tại, truyền rõ:
+
+```powershell
+.\scripts\run_demo.ps1 -CertRoot "D:\path\to\data\cert-r4.2"
+```
+
+## Chạy full evaluation cohort
+
+```powershell
+.\scripts\run_evaluation.ps1
+```
+
+Mặc định script dùng 2 control / insider và không giới hạn replay. Kết quả chính:
+
+- `artifacts/graph_metrics.json`: precision, recall, F1, false positive rate, MTTD của graph motifs.
+- `artifacts/rule_metrics.json`: cùng metric cho flat rules.
+- `artifacts/comparison.json`: delta giữa graph và rule.
+- `artifacts/run_profile.json`: elapsed time, config cohort, đường dẫn artifact, Docker memory snapshot.
+
+Có thể bỏ qua bước đã chạy trước:
+
+```powershell
+.\scripts\run_evaluation.ps1 -SkipPrepare -SkipReplay
+```
+
+## Chạy từng bước thủ công
+
+### 1. Chuẩn bị stream từ CERT thật
+
+```powershell
+python 1_prepare_cert_data.py `
+  --input-dir data/cert-r4.2/r4.2 `
+  --answers-dir data/cert-r4.2/answers `
+  --output artifacts/evaluation_stream.jsonl `
+  --manifest artifacts/cohort.json `
+  --controls-per-insider 2 `
   --run-size 50000
 ```
 
-## Bước 2: replay stream vào Memgraph
+### 2. Replay stream vào Memgraph
 
-```bash
-python 2_stream_cert.py \
-  --stream artifacts/evaluation_stream.jsonl \
-  --uri bolt://localhost:7687 \
-  --reset \
-  --delay 0 \
+```powershell
+python 2_stream_cert.py `
+  --stream artifacts/evaluation_stream.jsonl `
+  --uri bolt://localhost:7687 `
+  --reset `
+  --delay 0 `
   --summary artifacts/replay_summary.json
 ```
 
-Demo nhanh:
+Demo bounded:
 
-```bash
-python 2_stream_cert.py --stream artifacts/evaluation_stream.jsonl --reset --limit 5000
+```powershell
+python 2_stream_cert.py --stream artifacts/evaluation_stream.jsonl --reset --limit 5000 --delay 0
 ```
 
-## Use cases graph streaming
+### 3. So sánh graph detector với rule baseline
 
-UC1: anomalous exfiltration motif
+```powershell
+python evaluation.py `
+  --answers-dir data/cert-r4.2/answers `
+  --stream artifacts/evaluation_stream.jsonl `
+  --uri bolt://localhost:7687 `
+  --graph-output artifacts/graph_metrics.json `
+  --rule-output artifacts/rule_metrics.json `
+  --comparison-output artifacts/comparison.json
+```
+
+## Temporal graph schema
+
+Node chính:
+
+- `User(id)`
+- `Machine(id)`
+- `Event(id, kind, event_ts, user_id, machine_id, ...)`
+- `Domain(name)`
+- `EmailAddress(address)`
+- `ActivityWindow(id)`
+- `UsbSession(id)`
+- `Alert(id, detector, score, threshold, components, evidence_event_ids, ...)`
+
+Quan hệ chính:
+
+- `(User)-[:ACTED]->(Event)`
+- `(Event)-[:ON_MACHINE]->(Machine)`
+- `(User)-[:USED_MACHINE]->(Machine)`
+- `(Event)-[:VISITED_DOMAIN]->(Domain)`
+- `(Event)-[:SENT_TO]->(EmailAddress)`
+- `(User)-[:EMAILED]->(EmailAddress)`
+- `(Event)-[:IN_WINDOW]->(ActivityWindow)`
+- `(Event)-[:IN_USB_SESSION]->(UsbSession)`
+- `(Alert)-[:EVIDENCE]->(Event)`
+- `(Alert)-[:ABOUT]->(User)`
+- `(Alert)-[:INVOLVES]->(Machine)`
+
+## Use case 1: anomalous exfiltration motif
+
+Motif:
 
 ```text
-LOGON lệch baseline cá nhân -> USB -> FILE_COPY burst -> domain leak/cloud mới
+LOGON lệch baseline cá nhân
+  -> USB connect
+  -> FILE_COPY burst hoặc domain leak/job/cloud mới
+  -> cùng user/machine trong temporal evidence path
+```
 
+Score:
+
+```text
 S1 = 0.20A + 0.25U + 0.25F + 0.15D + 0.15C1
 Gate: U > 0, C1 >= 0.60, S1 >= threshold
 ```
 
-Trong đó:
+Thành phần:
 
-- `A`: độ bất thường giờ đăng nhập theo histogram giờ của chính user.
-- `U`: USB mới hoặc USB daily count tăng mạnh so với lịch sử.
-- `F`: số file copy vượt robust baseline.
-- `D`: độ mới của domain đối với user.
-- `C1`: continuity của temporal evidence path, có stage coverage, thứ tự thời gian, cùng machine và decay 8h/30 ngày.
+- `A`: bất thường giờ đăng nhập theo histogram giờ của chính user.
+- `U`: USB mới hoặc số lần USB trong ngày tăng mạnh so với lịch sử.
+- `F`: số file copy vượt robust baseline cá nhân.
+- `D`: domain mới đối với user, ưu tiên leak/cloud/job signal.
+- `C1`: continuity của path, gồm stage coverage, đúng thứ tự thời gian, cùng machine và decay theo khoảng cách thời gian.
 
-UC2: credential pivot motif
+Điểm khác rule-based: UC1 không chỉ bắt “copy nhiều file”; nó bắt motif có ngữ cảnh trước/sau, ví dụ scenario 2 có USB spike + job-domain intent dù không có một burst file-copy đơn giản.
+
+## Use case 2: credential pivot motif
+
+Motif:
 
 ```text
-attacker keylogger/download + USB/filecopy -> login target machine -> victim email fan-out
+attacker keylogger/download + USB/filecopy
+  -> credential pivot sang machine của victim
+  -> victim email fan-out / recipient ngoài social neighborhood
+```
 
+Score:
+
+```text
 S2 = 0.25M + 0.25K + 0.20E + 0.15R + 0.15C2
 Gate: M >= 0.60, K >= 0.40, C2 >= 0.50, S2 >= threshold
 ```
 
-Trong đó:
+Thành phần:
 
-- `M = (1 - p(user,machine)) * owner_confidence(machine)`.
+- `M = (1 - p(user,machine)) * owner_confidence(machine)`: identity-machine edge mới/hiếm, có xét machine thường thuộc về ai.
 - `K`: coverage + order + 48h decay của keylogger/source USB/source file/pivot/target USB.
-- `E`: max(per-email fan-out deviation, 10-minute fan-out deviation).
-- `R`: phần recipient nằm ngoài 90-day social neighborhood.
-- `C2`: hop coverage + temporal order + identity bridge + 48h decay.
+- `E`: độ lệch email fan-out của victim theo per-email và cửa sổ 10 phút.
+- `R`: tỷ lệ recipient mới nằm ngoài 90-day social neighborhood.
+- `C2`: continuity của multi-hop path, gồm hop coverage, temporal order, identity bridge và 48h decay.
+
+Điểm khác rule-based: rule có thể flag “unseen machine” hoặc “email nhiều người”, nhưng UC2 nối được attacker -> machine pivot -> victim email burst trong cùng evidence path.
+
+## Threshold calibration
+
+`2_stream_cert.py` dùng các ngày đầu stream làm calibration window, mặc định 30 ngày:
+
+```text
+threshold_uc1 = percentile_99.5(score_uc1 trong calibration window)
+threshold_uc2 = percentile_99.5(score_uc2 trong calibration window)
+```
+
+Nếu calibration window chưa đủ candidate, fallback threshold mặc định là `0.75`. Có thể chỉnh:
+
+```powershell
+python 2_stream_cert.py --calibration-days 30
+$env:UC1_FALLBACK_THRESHOLD="0.75"
+$env:UC2_FALLBACK_THRESHOLD="0.75"
+```
+
+Replay summary ghi `thresholds`, `processed_events`, `alerts_persisted`, `throughput_events_per_second`, `peak_python_rss_mb`, `late_events`, `recomputed_neighborhoods`.
+
+## Flat rule baseline
+
+`rule_detectors.py` là baseline không dùng graph:
+
+- Rule UC1: after-hours logon + USB cùng ngày + file-count threshold hoặc external signal.
+- Rule UC2: keylogger gần USB, hoặc email recipient threshold, hoặc unseen machine.
+
+`evaluation.py` chạy rule baseline trên cùng `artifacts/evaluation_stream.jsonl`, rồi so với graph alerts theo cùng ground truth `answers/insiders.csv`.
+
+## Memgraph Lab visualization
+
+Chạy các query trong thư mục `queries/`:
+
+- `queries/alerts.cypher`: xem alert mới nhất, trigger event và event evidence.
+- `queries/uc1_evidence.cypher`: inspect evidence path UC1 quanh user/time.
+- `queries/uc2_evidence.cypher`: inspect multi-identity evidence path UC2 quanh victim/machine/time.
+
+Ví dụ xem alert evidence tổng quát:
+
+```cypher
+MATCH (alert:Alert)-[:EVIDENCE]->(event:Event)
+OPTIONAL MATCH (alert)-[:ABOUT]->(user:User)
+OPTIONAL MATCH (alert)-[:INVOLVES]->(machine:Machine)
+RETURN alert, event, user, machine
+ORDER BY alert.event_time DESC
+LIMIT 100;
+```
+
+## Yêu cầu tài nguyên
+
+Thiết kế hiện tại dành cho máy 8GB RAM / 8 vCPU:
+
+- Không load toàn bộ CERT vào memory; extraction dùng external sorted runs.
+- Chỉ dựng evaluation cohort gồm 70 insider thật + control thật được match.
+- Docker Compose cap Memgraph container ở 6GB để chừa RAM cho Python và OS.
+- Replay có pruning mặc định 90 ngày cho event cũ.
+
+Nếu quá RAM, giảm trước:
+
+```powershell
+.\scripts\run_evaluation.ps1 -ControlsPerInsider 1
+```
+
+## Giới hạn đã biết
+
+- CERT r4.2 không có removable-device ID thật, nên `UsbSession` được suy luận theo user-machine-connect window.
+- Source file là CSV được replay theo event-time, chưa nhận event từ Kafka/socket thật. Đây vẫn là streaming graph analytics ở tầng xử lý: mỗi event được ingest tuần tự, cập nhật graph và detector incremental.
+- Ground truth chỉ có insider interval ở `answers/`; không có nhãn từng event, nên evaluation match alert theo user + scenario + time window.
 
 ## Test
 
-```bash
-python -m unittest discover -s tests
+```powershell
+python -m compileall .
+python -m unittest discover -s tests -v
+docker compose config
+```
+
+Integration Memgraph live:
+
+```powershell
+docker compose up -d
+$env:MEMGRAPH_URI="bolt://localhost:7687"
+python -m unittest tests.test_graph_repository_integration -v
 ```
