@@ -377,7 +377,21 @@ def _continuity_component(
     trigger_ts: int,
 ) -> float:
     first_file = min(file_events, key=lambda event: event["event_ts"], default=None)
-    first_external = min(external_events, key=lambda event: event["event_ts"], default=None)
+    external_floor = max(
+        event["event_ts"]
+        for event in (usb_event, first_file)
+        if event
+    ) if (usb_event or first_file) else None
+    ordered_external_events = [
+        event
+        for event in external_events
+        if external_floor is None or event["event_ts"] >= external_floor
+    ]
+    first_external = min(
+        ordered_external_events or external_events,
+        key=lambda event: event["event_ts"],
+        default=None,
+    )
     stage_events = [event for event in (logon_event, usb_event, first_file, first_external) if event]
     if not stage_events:
         return 0.0
@@ -426,8 +440,8 @@ def _continuity_component(
     )
     duration = max(0, max(event["event_ts"] for event in stage_events) - min(event["event_ts"] for event in stage_events))
     execution_score = execution_coverage * order * time_decay(duration, 8 * 60 * 60)
-    intent_score = intent_coverage * time_decay(max(0, trigger_ts - min(event["event_ts"] for event in stage_events)), 30 * SECONDS_PER_DAY)
-    return min(execution_score, intent_score)
+    intent_score = intent_coverage * order * time_decay(max(0, trigger_ts - min(event["event_ts"] for event in stage_events)), 30 * SECONDS_PER_DAY)
+    return max(execution_score, intent_score)
 
 
 def _machine_risk_component(context: Mapping[str, Any]) -> float:

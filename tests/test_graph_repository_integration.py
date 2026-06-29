@@ -1,6 +1,7 @@
 import os
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from event_model import Event
 
@@ -8,6 +9,18 @@ from event_model import Event
 MEMGRAPH_URI = os.getenv("MEMGRAPH_URI")
 MEMGRAPH_USER = os.getenv("MEMGRAPH_USER")
 MEMGRAPH_PASSWORD = os.getenv("MEMGRAPH_PASSWORD")
+
+
+class AlertVisualizationQueryTest(unittest.TestCase):
+    def test_alert_query_file_contains_supported_views(self):
+        query = Path("queries/alerts.cypher").read_text(encoding="utf-8")
+
+        self.assertIn("MATCH p = (a:Alert)-[:ABOUT|EVIDENCE|INVOLVES*1..3]-(entity)", query)
+        self.assertIn("a:Alert {id: $alert_id}", query)
+        self.assertIn('detector: "uc1_exfiltration_motif"', query)
+        self.assertIn('detector: "uc2_credential_pivot_motif"', query)
+        self.assertIn("a.components AS components", query)
+        self.assertIn("UNWIND a.evidence_event_ids", query)
 
 
 @unittest.skipUnless(MEMGRAPH_URI, "MEMGRAPH_URI is not set; skipping Memgraph integration tests")
