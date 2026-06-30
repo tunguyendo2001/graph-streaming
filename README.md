@@ -68,6 +68,13 @@ Khởi tạo schema bằng cách chạy nội dung `init_schema.cypher` trong Me
 .\scripts\run_demo.ps1
 ```
 
+Linux/macOS:
+
+```bash
+chmod +x scripts/run_demo.sh
+./scripts/run_demo.sh
+```
+
 Script này dùng 1 control / insider, trích stream nhỏ hơn, replay 5.000 event đầu và ghi:
 
 - `artifacts/evaluation_stream.jsonl`
@@ -83,10 +90,23 @@ Nếu dữ liệu CERT nằm ngoài repo hiện tại, truyền rõ:
 .\scripts\run_demo.ps1 -CertRoot "D:\path\to\data\cert-r4.2"
 ```
 
+Linux/macOS:
+
+```bash
+./scripts/run_demo.sh --cert-root /path/to/data/cert-r4.2
+```
+
 ## Chạy full evaluation cohort
 
 ```powershell
 .\scripts\run_evaluation.ps1
+```
+
+Linux/macOS:
+
+```bash
+chmod +x scripts/run_evaluation.sh
+./scripts/run_evaluation.sh
 ```
 
 Mặc định script dùng 2 control / insider và không giới hạn replay. Kết quả chính:
@@ -100,6 +120,12 @@ Có thể bỏ qua bước đã chạy trước:
 
 ```powershell
 .\scripts\run_evaluation.ps1 -SkipPrepare -SkipReplay
+```
+
+Linux/macOS:
+
+```bash
+./scripts/run_evaluation.sh --skip-prepare --skip-replay
 ```
 
 ## Chạy từng bước thủ công
