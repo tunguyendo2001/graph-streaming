@@ -234,7 +234,7 @@ WITH u, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
     size: history_event.size,
     attachments: history_event.attachments
 } END) AS raw_history_events
-WITH u, [event IN raw_history_events WHERE event IS NOT NULL] AS history_events
+WITH u, reduce(acc = [], event IN raw_history_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS history_events
 OPTIONAL MATCH (u)-[:ACTED]->(candidate_event:Event)
 WHERE candidate_event.event_ts >= $motif_start_ts
   AND candidate_event.event_ts <= $trigger_ts
@@ -259,7 +259,7 @@ WITH u, history_events, collect(CASE WHEN candidate_event IS NULL THEN NULL ELSE
     size: candidate_event.size,
     attachments: candidate_event.attachments
 } END) AS raw_candidate_events
-WITH u, history_events, [event IN raw_candidate_events WHERE event IS NOT NULL] AS candidate_events
+WITH u, history_events, reduce(acc = [], event IN raw_candidate_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS candidate_events
 RETURN {
     user_id: u.id,
     history_start_ts: $history_start_ts,
@@ -297,7 +297,7 @@ WITH u, trigger_machine, collect(CASE WHEN history_event IS NULL THEN NULL ELSE 
     size: history_event.size,
     attachments: history_event.attachments
 } END) AS raw_history_events
-WITH u, trigger_machine, [event IN raw_history_events WHERE event IS NOT NULL] AS history_events
+WITH u, trigger_machine, reduce(acc = [], event IN raw_history_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS history_events
 OPTIONAL MATCH (u)-[emailed:EMAILED]->(address:EmailAddress)
 WHERE emailed.first_seen < $trigger_ts
 WITH u, trigger_machine, history_events, collect(address.address) AS recipient_history
@@ -385,7 +385,7 @@ WITH u,
      victim_total_machine_count,
      machine_owners,
      machine_total_count,
-     [event IN raw_stage_events WHERE event IS NOT NULL] AS stage_events
+     reduce(acc = [], event IN raw_stage_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS stage_events
 WITH u,
      trigger_machine,
      history_events,
@@ -396,15 +396,17 @@ WITH u,
      machine_owners,
      machine_total_count,
      stage_events,
-     [event IN stage_events WHERE event.user_id <> u.id | event.user_id] AS attacker_ids
+     reduce(acc = [], event IN stage_events | CASE WHEN event.user_id <> u.id THEN acc + [event.user_id] ELSE acc END) AS attacker_ids
+WITH u, trigger_machine, history_events, recipient_history, used, victim_machine_count, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids,
+     CASE WHEN size(machine_owners) > 0 THEN machine_owners[0] ELSE NULL END AS primary_machine_owner
 RETURN {
     user_id: u.id,
     machine_id: $machine_id,
     target_machine_id: $machine_id,
     attacker_user_id: CASE WHEN size(attacker_ids) = 0 THEN NULL ELSE attacker_ids[0] END,
     owner_confidence: CASE
-        WHEN machine_total_count IS NULL OR machine_total_count = 0 THEN 0.0
-        ELSE toFloat(machine_owners[0].count) / machine_total_count
+        WHEN machine_total_count IS NULL OR machine_total_count = 0 OR primary_machine_owner IS NULL THEN 0.0
+        ELSE toFloat(primary_machine_owner.count) / machine_total_count
     END,
     user_machine_probability: CASE
         WHEN victim_total_machine_count IS NULL OR victim_total_machine_count = 0 THEN 0.0
@@ -416,8 +418,8 @@ RETURN {
     history_events: history_events,
     stage_events: stage_events,
     window_events: stage_events,
-    per_email_history: [event IN history_events WHERE event.kind = 'EMAIL' | coalesce(event.recipient_count, 0)],
-    window_fanout_history: [event IN history_events WHERE event.kind = 'EMAIL' AND event.event_ts >= $trigger_ts - 600 | coalesce(event.recipient_count, 0)],
+    per_email_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
+    window_fanout_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' AND event.event_ts >= $trigger_ts - 600 THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
     recipient_history: recipient_history,
     machine_use: {
         count: coalesce(used.count, 0),
@@ -480,9 +482,9 @@ class GraphRepository:
             "event_id": record["event_id"],
             "source": record["source"],
             "kind": record["kind"],
-            "event_time": event.event_time,
+            "event_time": record["event_time"],
             "event_ts": record["event_ts"],
-            "ingest_time": ingest_time,
+            "ingest_time": ingest_time.isoformat(sep=" "),
             "user_id": record["user_id"],
             "machine_id": record["machine_id"],
             "properties": record["properties"],
@@ -585,7 +587,7 @@ class GraphRepository:
             "score": alert.score,
             "threshold": alert.threshold,
             "trigger_event_id": alert.trigger_event_id,
-            "event_time": alert.event_time,
+            "event_time": alert.event_time.isoformat(sep=" "),
             "components": alert.components,
             "user_ids": list(alert.user_ids),
             "machine_ids": list(alert.machine_ids),

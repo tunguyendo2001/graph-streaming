@@ -18,7 +18,7 @@ INCIDENT_COLUMNS = ("dataset", "scenario", "details", "user", "start", "end")
 LOGON_COLUMNS = ("id", "date", "user", "pc", "activity")
 DEVICE_COLUMNS = ("id", "date", "user", "pc", "activity")
 FILE_COLUMNS = ("id", "date", "user", "pc", "filename", "content")
-HTTP_COLUMNS = ("id", "date", "user", "pc", "url")
+HTTP_COLUMNS = ("id", "date", "user", "pc", "url", "content")
 EMAIL_COLUMNS = (
     "id",
     "date",
@@ -491,11 +491,11 @@ def iter_source_events(source_path, source, cohort):
         reader = csv.DictReader(handle)
         _require_columns(source_path.name, reader.fieldnames, expected_columns)
         for row_number, row in enumerate(reader, start=2):
-            row = _validate_row(source_path.name, row_number, row, required_columns)
-            timestamp = _parse_cert_datetime(row["date"], source_path.name, row_number, "date")
             user_id = row["user"]
             if user_id not in cohort:
                 continue
+            row = _validate_row(source_path.name, row_number, row, required_columns)
+            timestamp = _parse_cert_datetime(row["date"], source_path.name, row_number, "date")
             yield _normalize_source_event(source, row, timestamp)
 
 
