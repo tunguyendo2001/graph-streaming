@@ -7,6 +7,7 @@ from pathlib import Path
 
 from neo4j import GraphDatabase
 
+from event_model import DEFAULT_SORT_RUN_SIZE
 from event_replay import ReplayConfig, ReplayEngine
 from graph_detectors import UC1Detector, UC2Detector
 from graph_repository import GraphRepository
@@ -56,6 +57,7 @@ def replay_cert_stream(
     limit: int | None,
     calibration_days: int,
     allowed_lateness_seconds: int,
+    replay_run_size: int,
     summary_path: Path,
 ) -> dict:
     if not stream_path.exists():
@@ -75,6 +77,7 @@ def replay_cert_stream(
             uc1_fallback_threshold=float(os.getenv("UC1_FALLBACK_THRESHOLD", "0.75")),
             uc2_fallback_threshold=float(os.getenv("UC2_FALLBACK_THRESHOLD", "0.75")),
             prune_after_days=int(os.getenv("PRUNE_AFTER_DAYS", "90")),
+            sort_run_size=replay_run_size,
         )
         engine = ReplayEngine(repository, UC1Detector(), UC2Detector(), config)
         summary = engine.replay(replay_path).to_dict()
@@ -102,6 +105,12 @@ def main() -> None:
         type=int,
         default=int(os.getenv("ALLOWED_LATENESS_SECONDS", "300")),
     )
+    parser.add_argument(
+        "--replay-run-size",
+        type=int,
+        default=int(os.getenv("REPLAY_RUN_SIZE", str(DEFAULT_SORT_RUN_SIZE))),
+        help="Số event mỗi lô khi sắp xếp ngoài bộ nhớ (external sort); giảm giá trị này để hạ RAM đỉnh trên máy yếu.",
+    )
     parser.add_argument("--summary", default=os.getenv("REPLAY_SUMMARY_JSON", "artifacts/replay_summary.json"))
     args = parser.parse_args()
 
@@ -113,6 +122,7 @@ def main() -> None:
         limit=args.limit,
         calibration_days=args.calibration_days,
         allowed_lateness_seconds=args.allowed_lateness_seconds,
+        replay_run_size=args.replay_run_size,
         summary_path=Path(args.summary),
     )
     print(

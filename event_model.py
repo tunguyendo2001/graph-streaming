@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import heapq
+import json
+import shutil
+import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 CERT_TIME_FORMAT = "%m/%d/%Y %H:%M:%S"
@@ -12,6 +17,10 @@ KEYLOGGER_TERMS = ("keylogger", "spectorsoft", "keystroke", "monitoring")
 JOB_TERMS = ("monster.com", "careerbuilder", "job", "resume", "linkedin")
 LEAK_TERMS = ("wikileaks", "pastebin")
 CLOUD_TERMS = ("dropbox", "drive.google", "box.com", "onedrive")
+
+_FLAT_RECORD_ENVELOPE_KEYS = frozenset(
+    {"event_id", "source", "kind", "event_time", "event_ts", "user_id", "machine_id", "action", "pc", "properties"}
+)
 
 
 class FrozenList(list):
@@ -93,6 +102,12 @@ class Event:
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "Event":
         event_time = _parse_record_event_time(record["event_time"])
+        properties = record.get("properties")
+        if properties is None:
+            # cert_extractor.extract_evaluation_stream writes a flattened JSONL
+            # (no nested "properties" key) so the file stays human-readable;
+            # anything outside the core envelope fields is a property.
+            properties = {key: value for key, value in record.items() if key not in _FLAT_RECORD_ENVELOPE_KEYS}
         return cls(
             event_id=record["event_id"],
             source=record["source"],
@@ -100,7 +115,7 @@ class Event:
             event_time=event_time,
             user_id=record["user_id"],
             machine_id=record["machine_id"],
-            properties=_freeze(_clone(record.get("properties", {}))),
+            properties=_freeze(_clone(properties)),
         )
 
 
@@ -193,3 +208,95 @@ def parse_cert_row(source: str, row: dict[str, str]) -> Event:
         )
 
     raise ValueError(f"Unsupported CERT source: {source}")
+
+
+DEFAULT_SORT_RUN_SIZE = 20000
+
+
+def load_sorted_stream(stream_path: Path | str, run_size: int = DEFAULT_SORT_RUN_SIZE) -> tuple[Iterator[Event], int, int]:
+    """
+    Đọc JSONL event stream theo thứ tự (event_ts, event_id) mà không cần load toàn bộ
+    file vào RAM cùng lúc: dùng external merge sort (giống cert_extractor.py) để giới
+    hạn bộ nhớ đỉnh còn khoảng run_size record, bất kể file gốc lớn cỡ nào.
+
+    Trả về (event_iterator, late_events, recomputed_neighborhoods), trong đó hai số đếm
+    cuối phản ánh thứ tự thật trên đĩa (trước khi sắp xếp lại).
+    """
+    if run_size <= 0:
+        raise ValueError("run_size must be greater than 0")
+
+    stream_path = Path(stream_path)
+    if not stream_path.exists():
+        raise FileNotFoundError(f"stream file not found: {stream_path}")
+
+    temp_parent = stream_path.parent if str(stream_path.parent) else None
+    temp_dir = tempfile.mkdtemp(dir=temp_parent, prefix=f".{stream_path.stem}-sort-")
+    try:
+        run_paths, late_events, recomputes = _write_sorted_event_runs(stream_path, Path(temp_dir), run_size)
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+    return _merge_sorted_event_runs(run_paths, temp_dir), late_events, recomputes
+
+
+def _write_sorted_event_runs(stream_path: Path, temp_dir: Path, run_size: int) -> tuple[list[Path], int, int]:
+    run_paths: list[Path] = []
+    batch: list[dict[str, Any]] = []
+    late_events = 0
+    recomputes = 0
+    max_seen_ts: int | None = None
+
+    def flush() -> None:
+        if not batch:
+            return
+        batch.sort(key=lambda record: (record["event_ts"], record["event_id"]))
+        run_path = temp_dir / f"run-{len(run_paths):06d}.jsonl"
+        with run_path.open("w", encoding="utf-8") as handle:
+            for record in batch:
+                handle.write(json.dumps(record, separators=(",", ":")))
+                handle.write("\n")
+        run_paths.append(run_path)
+        batch.clear()
+
+    with stream_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except Exception as exc:  # pragma: no cover - message matters more than branch shape
+                raise ValueError(f"invalid JSONL event at {stream_path}:{line_number}: {exc}") from exc
+            event_ts = record["event_ts"]
+            if max_seen_ts is not None and event_ts < max_seen_ts:
+                late_events += 1
+                if max_seen_ts - event_ts <= 48 * 60 * 60:
+                    recomputes += 1
+            max_seen_ts = max(max_seen_ts or event_ts, event_ts)
+            batch.append(record)
+            if len(batch) >= run_size:
+                flush()
+        flush()
+
+    return run_paths, late_events, recomputes
+
+
+def _merge_sorted_event_runs(run_paths: list[Path], temp_dir: str) -> Iterator[Event]:
+    try:
+        with ExitStack() as stack:
+            iterators = [
+                _jsonl_record_iterator(stack.enter_context(run_path.open("r", encoding="utf-8")))
+                for run_path in run_paths
+            ]
+            for record in heapq.merge(*iterators, key=lambda record: (record["event_ts"], record["event_id"])):
+                yield Event.from_record(record)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _jsonl_record_iterator(handle):
+    for line in handle:
+        stripped = line.strip()
+        if stripped:
+            yield json.loads(stripped)

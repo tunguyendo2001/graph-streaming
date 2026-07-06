@@ -304,12 +304,24 @@ LIMIT 100;
 
 Thiết kế hiện tại dành cho máy 8GB RAM / 8 vCPU:
 
-- Không load toàn bộ CERT vào memory; extraction dùng external sorted runs.
+- Không load toàn bộ CERT vào memory; extraction (bước 1) dùng external sorted runs.
+- Replay (bước 2, `2_stream_cert.py`/`event_replay.py`) cũng dùng external merge sort để đọc
+  `evaluation_stream.jsonl` theo lô `--replay-run-size` (mặc định 20.000 event/lô) thay vì nạp
+  toàn bộ stream vào RAM cùng lúc, nên RAM đỉnh của tiến trình Python gần như không phụ thuộc
+  vào tổng số event trong cohort. `evaluation.py` (bước 3, rule baseline) dùng chung cơ chế này.
 - Chỉ dựng evaluation cohort gồm 70 insider thật + control thật được match.
 - Docker Compose cap Memgraph container ở 6GB để chừa RAM cho Python và OS.
 - Replay có pruning mặc định 90 ngày cho event cũ.
 
-Nếu quá RAM, giảm trước:
+Nếu vẫn OOM ở bước replay trên máy yếu, giảm dần theo thứ tự sau:
+
+```bash
+# 1. Giảm số event mỗi lô sort ngoài bộ nhớ (RAM đỉnh của Python ~ tỉ lệ thuận với số này)
+python 2_stream_cert.py --stream artifacts/evaluation_stream.jsonl --reset --replay-run-size 5000
+
+# 2. Giảm cohort (ít control hơn mỗi insider => stream nhỏ hơn, ít node/cạnh hơn trong Memgraph)
+./scripts/run_evaluation.sh --controls-per-insider 1
+```
 
 ```powershell
 .\scripts\run_evaluation.ps1 -ControlsPerInsider 1

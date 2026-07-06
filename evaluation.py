@@ -9,7 +9,7 @@ from statistics import mean
 from typing import Any, Iterable, Sequence
 
 from cert_extractor import Incident, load_incidents as _load_incidents_file
-from event_model import Event
+from event_model import Event, load_sorted_stream
 from rule_detectors import RuleUC1Detector, RuleUC2Detector
 
 
@@ -259,18 +259,12 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default), encoding="utf-8")
 
 
-def _load_stream_events(stream_path: Path) -> list[Event]:
-    events: list[Event] = []
-    with Path(stream_path).open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                events.append(Event.from_record(json.loads(stripped)))
-            except Exception as exc:
-                raise ValueError(f"invalid stream event at {stream_path}:{line_number}: {exc}") from exc
-    return sorted(events, key=lambda event: (event.event_ts, event.event_id))
+def _load_stream_events(stream_path: Path) -> Iterable[Event]:
+    events, _late_events, _recomputes = load_sorted_stream(Path(stream_path))
+    try:
+        yield from events
+    finally:
+        events.close()
 
 
 def _fetch_alert_rows(tx):

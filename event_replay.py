@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 import time
 from dataclasses import asdict, dataclass, field
@@ -8,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from event_model import Event
+from event_model import DEFAULT_SORT_RUN_SIZE, Event, load_sorted_stream
 
 try:  # pragma: no cover - exercised indirectly when psutil is installed
     import psutil
@@ -29,6 +28,7 @@ class ReplayConfig:
     uc1_fallback_threshold: float = 0.75
     uc2_fallback_threshold: float = 0.75
     prune_after_days: int = 90
+    sort_run_size: int = DEFAULT_SORT_RUN_SIZE
 
 
 @dataclass
@@ -58,8 +58,7 @@ class ReplayEngine:
 
     def replay(self, stream_path: Path | str) -> ReplaySummary:
         started = time.perf_counter()
-        events, late_events, recomputes = _load_events(Path(stream_path))
-        events.sort(key=lambda event: (event.event_ts, event.event_id))
+        events, late_events, recomputes = load_sorted_stream(Path(stream_path), run_size=self.config.sort_run_size)
 
         summary = ReplaySummary(
             thresholds={
@@ -74,37 +73,40 @@ class ReplayEngine:
         calibration_end_ts = None
         thresholds_frozen = self.config.calibration_days <= 0
 
-        for event in events:
-            if calibration_end_ts is None:
-                calibration_end_ts = event.event_ts + self.config.calibration_days * SECONDS_PER_DAY
+        try:
+            for event in events:
+                if calibration_end_ts is None:
+                    calibration_end_ts = event.event_ts + self.config.calibration_days * SECONDS_PER_DAY
 
-            if self.config.delay_seconds > 0:
-                time.sleep(self.config.delay_seconds)
+                if self.config.delay_seconds > 0:
+                    time.sleep(self.config.delay_seconds)
 
-            ingest_time = datetime.now(timezone.utc)
-            result = self.repository.write_event(event, ingest_time)
-            if not getattr(result, "created", False):
-                summary.duplicate_events += 1
-                continue
+                ingest_time = datetime.now(timezone.utc)
+                result = self.repository.write_event(event, ingest_time)
+                if not getattr(result, "created", False):
+                    summary.duplicate_events += 1
+                    continue
 
-            summary.processed_events += 1
-            in_calibration = (
-                self.config.calibration_days > 0
-                and calibration_end_ts is not None
-                and event.event_ts < calibration_end_ts
-            )
-            if in_calibration:
-                summary.calibration_events += 1
-            elif not thresholds_frozen:
-                _freeze_thresholds(summary.thresholds, calibration_scores, self.config)
-                thresholds_frozen = True
+                summary.processed_events += 1
+                in_calibration = (
+                    self.config.calibration_days > 0
+                    and calibration_end_ts is not None
+                    and event.event_ts < calibration_end_ts
+                )
+                if in_calibration:
+                    summary.calibration_events += 1
+                elif not thresholds_frozen:
+                    _freeze_thresholds(summary.thresholds, calibration_scores, self.config)
+                    thresholds_frozen = True
 
-            self._run_detectors(event, summary, calibration_scores, in_calibration)
-            self._prune_if_configured(event)
-            if hasattr(self.repository, "update_baselines"):
-                self.repository.update_baselines(event)
-            if summary.processed_events % 1000 == 0:
-                summary.peak_python_rss_mb = max(summary.peak_python_rss_mb, _current_rss_mb())
+                self._run_detectors(event, summary, calibration_scores, in_calibration)
+                self._prune_if_configured(event)
+                if hasattr(self.repository, "update_baselines"):
+                    self.repository.update_baselines(event)
+                if summary.processed_events % 1000 == 0:
+                    summary.peak_python_rss_mb = max(summary.peak_python_rss_mb, _current_rss_mb())
+        finally:
+            events.close()
 
         if not thresholds_frozen:
             _freeze_thresholds(summary.thresholds, calibration_scores, self.config)
@@ -177,31 +179,6 @@ class ReplayEngine:
             return
         if hasattr(self.repository, "prune_events"):
             self.repository.prune_events(event.event_ts - self.config.prune_after_days * SECONDS_PER_DAY)
-
-
-def _load_events(stream_path: Path) -> tuple[list[Event], int, int]:
-    if not stream_path.exists():
-        raise FileNotFoundError(f"stream file not found: {stream_path}")
-    events: list[Event] = []
-    late_events = 0
-    recomputes = 0
-    max_seen_ts: int | None = None
-    with stream_path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                event = Event.from_record(json.loads(stripped))
-            except Exception as exc:  # pragma: no cover - message matters more than branch shape
-                raise ValueError(f"invalid JSONL event at {stream_path}:{line_number}: {exc}") from exc
-            if max_seen_ts is not None and event.event_ts < max_seen_ts:
-                late_events += 1
-                if max_seen_ts - event.event_ts <= 48 * 60 * 60:
-                    recomputes += 1
-            max_seen_ts = max(max_seen_ts or event.event_ts, event.event_ts)
-            events.append(event)
-    return events, late_events, recomputes
 
 
 def _freeze_thresholds(
