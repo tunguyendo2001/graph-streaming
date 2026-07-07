@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
 from event_model import Event
+
+
+_SCHEMA_PATH = Path(__file__).resolve().parent / "init_schema.cypher"
 
 
 @dataclass(frozen=True)
@@ -210,56 +214,60 @@ DETACH DELETE e
 
 _UC1_CONTEXT_QUERY = """
 MATCH (u:User {id: $user_id})
-OPTIONAL MATCH (u)-[:ACTED]->(history_event:Event)
-WHERE history_event.event_ts >= $history_start_ts
-  AND history_event.event_ts < $trigger_ts
-WITH u, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
-    event_id: history_event.id,
-    source: history_event.source,
-    kind: history_event.kind,
-    user_id: history_event.user_id,
-    event_ts: history_event.event_ts,
-    machine_id: history_event.machine_id,
-    activity: history_event.activity,
-    filename: history_event.filename,
-    extension: history_event.extension,
-    domain: history_event.domain,
-    url: history_event.url,
-    keylogger_signal: history_event.keylogger_signal,
-    job_signal: history_event.job_signal,
-    leak_signal: history_event.leak_signal,
-    cloud_signal: history_event.cloud_signal,
-    recipient_count: history_event.recipient_count,
-    recipients: history_event.recipients,
-    size: history_event.size,
-    attachments: history_event.attachments
-} END) AS raw_history_events
-WITH u, reduce(acc = [], event IN raw_history_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS history_events
-OPTIONAL MATCH (u)-[:ACTED]->(candidate_event:Event)
-WHERE candidate_event.event_ts >= $motif_start_ts
-  AND candidate_event.event_ts <= $trigger_ts
-WITH u, history_events, collect(CASE WHEN candidate_event IS NULL THEN NULL ELSE {
-    event_id: candidate_event.id,
-    source: candidate_event.source,
-    kind: candidate_event.kind,
-    user_id: candidate_event.user_id,
-    event_ts: candidate_event.event_ts,
-    machine_id: candidate_event.machine_id,
-    activity: candidate_event.activity,
-    filename: candidate_event.filename,
-    extension: candidate_event.extension,
-    domain: candidate_event.domain,
-    url: candidate_event.url,
-    keylogger_signal: candidate_event.keylogger_signal,
-    job_signal: candidate_event.job_signal,
-    leak_signal: candidate_event.leak_signal,
-    cloud_signal: candidate_event.cloud_signal,
-    recipient_count: candidate_event.recipient_count,
-    recipients: candidate_event.recipients,
-    size: candidate_event.size,
-    attachments: candidate_event.attachments
-} END) AS raw_candidate_events
-WITH u, history_events, reduce(acc = [], event IN raw_candidate_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS candidate_events
+CALL {
+    WITH u
+    OPTIONAL MATCH (u)-[:ACTED]->(history_event:Event)
+    WHERE history_event.event_ts >= $history_start_ts
+      AND history_event.event_ts < $trigger_ts
+    RETURN collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
+        event_id: history_event.id,
+        source: history_event.source,
+        kind: history_event.kind,
+        user_id: history_event.user_id,
+        event_ts: history_event.event_ts,
+        machine_id: history_event.machine_id,
+        activity: history_event.activity,
+        filename: history_event.filename,
+        extension: history_event.extension,
+        domain: history_event.domain,
+        url: history_event.url,
+        keylogger_signal: history_event.keylogger_signal,
+        job_signal: history_event.job_signal,
+        leak_signal: history_event.leak_signal,
+        cloud_signal: history_event.cloud_signal,
+        recipient_count: history_event.recipient_count,
+        recipients: history_event.recipients,
+        size: history_event.size,
+        attachments: history_event.attachments
+    } END) AS history_events
+}
+CALL {
+    WITH u
+    OPTIONAL MATCH (u)-[:ACTED]->(candidate_event:Event)
+    WHERE candidate_event.event_ts >= $motif_start_ts
+      AND candidate_event.event_ts <= $trigger_ts
+    RETURN collect(CASE WHEN candidate_event IS NULL THEN NULL ELSE {
+        event_id: candidate_event.id,
+        source: candidate_event.source,
+        kind: candidate_event.kind,
+        user_id: candidate_event.user_id,
+        event_ts: candidate_event.event_ts,
+        machine_id: candidate_event.machine_id,
+        activity: candidate_event.activity,
+        filename: candidate_event.filename,
+        extension: candidate_event.extension,
+        domain: candidate_event.domain,
+        url: candidate_event.url,
+        keylogger_signal: candidate_event.keylogger_signal,
+        job_signal: candidate_event.job_signal,
+        leak_signal: candidate_event.leak_signal,
+        cloud_signal: candidate_event.cloud_signal,
+        recipient_count: candidate_event.recipient_count,
+        recipients: candidate_event.recipients,
+        size: candidate_event.size,
+        attachments: candidate_event.attachments
+    } END) AS candidate_events
+}
 RETURN {
     user_id: u.id,
     history_start_ts: $history_start_ts,
@@ -273,131 +281,110 @@ RETURN {
 _UC2_CONTEXT_QUERY = """
 MATCH (u:User {id: $user_id})
 OPTIONAL MATCH (trigger_machine:Machine {id: $machine_id})
-OPTIONAL MATCH (u)-[:ACTED]->(history_event:Event)
-WHERE history_event.event_ts >= $history_start_ts
-  AND history_event.event_ts < $trigger_ts
-WITH u, trigger_machine, collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
-    event_id: history_event.id,
-    source: history_event.source,
-    kind: history_event.kind,
-    user_id: history_event.user_id,
-    event_ts: history_event.event_ts,
-    machine_id: history_event.machine_id,
-    activity: history_event.activity,
-    filename: history_event.filename,
-    extension: history_event.extension,
-    domain: history_event.domain,
-    url: history_event.url,
-    keylogger_signal: history_event.keylogger_signal,
-    job_signal: history_event.job_signal,
-    leak_signal: history_event.leak_signal,
-    cloud_signal: history_event.cloud_signal,
-    recipient_count: history_event.recipient_count,
-    recipients: history_event.recipients,
-    size: history_event.size,
-    attachments: history_event.attachments
-} END) AS raw_history_events
-WITH u, trigger_machine, reduce(acc = [], event IN raw_history_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS history_events
-OPTIONAL MATCH (u)-[emailed:EMAILED]->(address:EmailAddress)
-WHERE emailed.first_seen < $trigger_ts
-WITH u, trigger_machine, history_events, collect(address.address) AS recipient_history
-OPTIONAL MATCH (u)-[used:USED_MACHINE]->(trigger_machine)
+CALL {
+    WITH u
+    OPTIONAL MATCH (u)-[:ACTED]->(history_event:Event)
+    WHERE history_event.event_ts >= $history_start_ts
+      AND history_event.event_ts < $trigger_ts
+    RETURN collect(CASE WHEN history_event IS NULL THEN NULL ELSE {
+        event_id: history_event.id,
+        source: history_event.source,
+        kind: history_event.kind,
+        user_id: history_event.user_id,
+        event_ts: history_event.event_ts,
+        machine_id: history_event.machine_id,
+        activity: history_event.activity,
+        filename: history_event.filename,
+        extension: history_event.extension,
+        domain: history_event.domain,
+        url: history_event.url,
+        keylogger_signal: history_event.keylogger_signal,
+        job_signal: history_event.job_signal,
+        leak_signal: history_event.leak_signal,
+        cloud_signal: history_event.cloud_signal,
+        recipient_count: history_event.recipient_count,
+        recipients: history_event.recipients,
+        size: history_event.size,
+        attachments: history_event.attachments
+    } END) AS history_events,
+    collect(CASE WHEN history_event IS NOT NULL AND history_event.kind = 'EMAIL' THEN coalesce(history_event.recipient_count, 0) END) AS per_email_history,
+    collect(CASE WHEN history_event IS NOT NULL AND history_event.kind = 'EMAIL' AND history_event.event_ts >= $trigger_ts - 600 THEN coalesce(history_event.recipient_count, 0) END) AS window_fanout_history
+}
+CALL {
+    WITH u
+    OPTIONAL MATCH (u)-[emailed:EMAILED]->(address:EmailAddress)
+    WHERE emailed.first_seen < $trigger_ts
+    RETURN collect(address.address) AS recipient_history
+}
+CALL {
+    WITH u, trigger_machine
+    OPTIONAL MATCH (u)-[used:USED_MACHINE]->(trigger_machine)
+    RETURN coalesce(used.count, 0) AS victim_machine_count,
+           used.first_seen AS used_first_seen,
+           used.last_seen AS used_last_seen
+}
+CALL {
+    WITH u
+    OPTIONAL MATCH (u)-[all_used:USED_MACHINE]->(:Machine)
+    RETURN sum(coalesce(all_used.count, 0)) AS victim_total_machine_count
+}
+CALL {
+    WITH u, trigger_machine
+    OPTIONAL MATCH (owner:User)-[owner_used:USED_MACHINE]->(trigger_machine)
+    WITH owner, owner_used
+    ORDER BY coalesce(owner_used.count, 0) DESC
+    RETURN collect({user_id: owner.id, count: coalesce(owner_used.count, 0)}) AS machine_owners,
+           sum(coalesce(owner_used.count, 0)) AS machine_total_count
+}
+CALL {
+    WITH u
+    OPTIONAL MATCH (attacker:User)-[:ACTED]->(stage_event:Event)-[:ON_MACHINE]->(stage_machine:Machine)
+    WHERE attacker.id <> u.id
+      AND stage_event.event_ts >= $window_start_ts
+      AND stage_event.event_ts <= $trigger_ts
+      AND (
+          stage_machine.id = $machine_id
+          OR stage_event.keylogger_signal = true
+          OR stage_event.kind IN ['HTTP', 'DEVICE_CONNECT', 'FILE_COPY', 'LOGON']
+      )
+    RETURN collect(CASE WHEN stage_event IS NULL THEN NULL ELSE {
+        event_id: stage_event.id,
+        source: stage_event.source,
+        kind: stage_event.kind,
+        user_id: attacker.id,
+        event_ts: stage_event.event_ts,
+        machine_id: stage_machine.id,
+        activity: stage_event.activity,
+        filename: stage_event.filename,
+        extension: stage_event.extension,
+        domain: stage_event.domain,
+        url: stage_event.url,
+        keylogger_signal: stage_event.keylogger_signal,
+        download_signal: stage_event.download_signal,
+        job_signal: stage_event.job_signal,
+        leak_signal: stage_event.leak_signal,
+        cloud_signal: stage_event.cloud_signal,
+        recipient_count: stage_event.recipient_count,
+        recipients: stage_event.recipients,
+        size: stage_event.size,
+        attachments: stage_event.attachments
+    } END) AS stage_events,
+    collect(CASE WHEN stage_event IS NOT NULL AND attacker.id <> u.id THEN attacker.id END) AS attacker_ids
+}
 WITH u,
      trigger_machine,
      history_events,
+     per_email_history,
+     window_fanout_history,
      recipient_history,
-     used,
-     coalesce(used.count, 0) AS victim_machine_count
-OPTIONAL MATCH (u)-[all_used:USED_MACHINE]->(:Machine)
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
      victim_machine_count,
-     sum(coalesce(all_used.count, 0)) AS victim_total_machine_count
-OPTIONAL MATCH (owner:User)-[owner_used:USED_MACHINE]->(trigger_machine)
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
-     victim_machine_count,
-     victim_total_machine_count,
-     owner,
-     owner_used
-ORDER BY coalesce(owner_used.count, 0) DESC
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
-     victim_machine_count,
-     victim_total_machine_count,
-     collect({user_id: owner.id, count: coalesce(owner_used.count, 0)}) AS machine_owners,
-     sum(coalesce(owner_used.count, 0)) AS machine_total_count
-OPTIONAL MATCH (attacker:User)-[:ACTED]->(stage_event:Event)-[:ON_MACHINE]->(stage_machine:Machine)
-WHERE attacker.id <> u.id
-  AND stage_event.event_ts >= $window_start_ts
-  AND stage_event.event_ts <= $trigger_ts
-  AND (
-      stage_machine.id = $machine_id
-      OR stage_event.keylogger_signal = true
-      OR stage_event.kind IN ['HTTP', 'DEVICE_CONNECT', 'FILE_COPY', 'LOGON']
-  )
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
-     victim_machine_count,
-     victim_total_machine_count,
-     machine_owners,
-     machine_total_count,
-     collect(CASE WHEN stage_event IS NULL THEN NULL ELSE {
-         event_id: stage_event.id,
-         source: stage_event.source,
-         kind: stage_event.kind,
-         user_id: attacker.id,
-         event_ts: stage_event.event_ts,
-         machine_id: stage_machine.id,
-         activity: stage_event.activity,
-         filename: stage_event.filename,
-         extension: stage_event.extension,
-         domain: stage_event.domain,
-         url: stage_event.url,
-         keylogger_signal: stage_event.keylogger_signal,
-         download_signal: stage_event.download_signal,
-         job_signal: stage_event.job_signal,
-         leak_signal: stage_event.leak_signal,
-         cloud_signal: stage_event.cloud_signal,
-         recipient_count: stage_event.recipient_count,
-         recipients: stage_event.recipients,
-         size: stage_event.size,
-         attachments: stage_event.attachments
-     } END) AS raw_stage_events
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
-     victim_machine_count,
-     victim_total_machine_count,
-     machine_owners,
-     machine_total_count,
-     reduce(acc = [], event IN raw_stage_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS stage_events
-WITH u,
-     trigger_machine,
-     history_events,
-     recipient_history,
-     used,
-     victim_machine_count,
+     used_first_seen,
+     used_last_seen,
      victim_total_machine_count,
      machine_owners,
      machine_total_count,
      stage_events,
-     reduce(acc = [], event IN stage_events | CASE WHEN event.user_id <> u.id THEN acc + [event.user_id] ELSE acc END) AS attacker_ids
-WITH u, trigger_machine, history_events, recipient_history, used, victim_machine_count, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids,
+     attacker_ids,
      CASE WHEN size(machine_owners) > 0 THEN machine_owners[0] ELSE NULL END AS primary_machine_owner
 RETURN {
     user_id: u.id,
@@ -418,14 +405,14 @@ RETURN {
     history_events: history_events,
     stage_events: stage_events,
     window_events: stage_events,
-    per_email_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
-    window_fanout_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' AND event.event_ts >= $trigger_ts - 600 THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
+    per_email_history: per_email_history,
+    window_fanout_history: window_fanout_history,
     recipient_history: recipient_history,
     machine_use: {
-        count: coalesce(used.count, 0),
+        count: victim_machine_count,
         total_count: coalesce(victim_total_machine_count, 0),
-        first_seen: used.first_seen,
-        last_seen: used.last_seen
+        first_seen: used_first_seen,
+        last_seen: used_last_seen
     }
 } AS context
 """
@@ -503,6 +490,23 @@ class GraphRepository:
             tx.run(_RESET_QUERY)
 
         self._execute_write(tx_fn)
+
+    def apply_schema(self, schema_path: Path | str = _SCHEMA_PATH) -> list[str]:
+        """Apply label-property indexes so MERGE/MATCH avoid full scans.
+
+        Each statement runs in its own auto-commit transaction because Memgraph
+        does not allow index creation inside an explicit multi-command
+        transaction. Re-running is safe: creating an existing index is a no-op.
+        """
+        statements = [
+            line.strip()
+            for line in Path(schema_path).read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("//")
+        ]
+        with self._session() as session:
+            for statement in statements:
+                session.run(statement).consume()
+        return statements
 
     def write_event(self, event: Event, ingest_time: datetime) -> WriteResult:
         params = self._record_to_params(event, ingest_time)
