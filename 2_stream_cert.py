@@ -70,6 +70,8 @@ def replay_cert_stream(
         if reset:
             print("[STREAM] Xóa graph cũ trước khi replay...")
             repository.reset()
+        applied = repository.apply_schema()
+        print(f"[STREAM] Đã đảm bảo {len(applied)} index (init_schema.cypher).")
         config = ReplayConfig(
             calibration_days=calibration_days,
             allowed_lateness_seconds=allowed_lateness_seconds,

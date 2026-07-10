@@ -3,10 +3,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
 from event_model import Event
+
+
+_SCHEMA_PATH = Path(__file__).resolve().parent / "init_schema.cypher"
 
 
 @dataclass(frozen=True)
@@ -503,6 +507,23 @@ class GraphRepository:
             tx.run(_RESET_QUERY)
 
         self._execute_write(tx_fn)
+
+    def apply_schema(self, schema_path: Path | str = _SCHEMA_PATH) -> list[str]:
+        """Apply label-property indexes so MERGE/MATCH avoid full scans.
+
+        Each statement runs in its own auto-commit transaction because Memgraph
+        does not allow index creation inside an explicit multi-command
+        transaction. Re-running is safe: creating an existing index is a no-op.
+        """
+        statements = [
+            line.strip()
+            for line in Path(schema_path).read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("//")
+        ]
+        with self._session() as session:
+            for statement in statements:
+                session.run(statement).consume()
+        return statements
 
     def write_event(self, event: Event, ingest_time: datetime) -> WriteResult:
         params = self._record_to_params(event, ingest_time)
