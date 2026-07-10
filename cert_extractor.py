@@ -480,7 +480,27 @@ def write_cohort_manifest(path, incidents, controls) -> None:
     )
 
 
-def iter_source_events(source_path, source, cohort):
+def load_incident_detail_user_ids(answers_dir, incident: Incident) -> set[str]:
+    """
+    Đọc file ground-truth chi tiết của 1 incident (answers/r4.2-<scenario>/<details_file>)
+    và trả về mọi user_id xuất hiện trong đó. Với motif nhiều identity (vd UC2 credential
+    pivot, insider đăng nhập lên máy người khác rồi email fan-out từ danh tính nạn nhân),
+    chỉ đưa insider vào cohort là không đủ: thiếu hoạt động thật của nạn nhân thì Memgraph
+    không có baseline "ai thường dùng máy này" / "ai thường nhận mail từ ai" để so sánh, nên
+    motif sẽ không bao giờ đủ điều kiện bắn alert dù có insider trong graph.
+    """
+    detail_path = Path(answers_dir) / f"r4.2-{incident.scenario}" / incident.details_file
+    user_ids = {incident.user_id}
+    if not detail_path.exists():
+        return user_ids
+    with detail_path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.reader(handle):
+            if len(row) > 3 and row[3].strip():
+                user_ids.add(row[3].strip())
+    return user_ids
+
+
+def iter_source_events(source_path, source, cohort, *, start=None, end=None):
     source_path = Path(source_path)
     cohort = {str(user_id) for user_id in cohort}
     if not source_path.exists():
@@ -496,6 +516,10 @@ def iter_source_events(source_path, source, cohort):
                 continue
             row = _validate_row(source_path.name, row_number, row, required_columns)
             timestamp = _parse_cert_datetime(row["date"], source_path.name, row_number, "date")
+            if start is not None and timestamp < start:
+                continue
+            if end is not None and timestamp > end:
+                continue
             yield _normalize_source_event(source, row, timestamp)
 
 
@@ -564,7 +588,7 @@ def merge_jsonl_runs(run_paths, output_path):
     )
 
 
-def extract_evaluation_stream(input_dir, cohort, output_path, run_size=50000) -> ExtractionResult:
+def extract_evaluation_stream(input_dir, cohort, output_path, run_size=50000, *, start=None, end=None) -> ExtractionResult:
     input_dir = Path(input_dir)
     output_path = Path(output_path)
     cohort = {str(user_id) for user_id in cohort}
@@ -578,7 +602,7 @@ def extract_evaluation_stream(input_dir, cohort, output_path, run_size=50000) ->
     events = (
         event
         for source_name in EVENT_SOURCE_FILES
-        for event in iter_source_events(input_dir / source_name, source_name[:-4], cohort)
+        for event in iter_source_events(input_dir / source_name, source_name[:-4], cohort, start=start, end=end)
     )
 
     temp_parent = output_path.parent if output_path.parent != Path("") else None

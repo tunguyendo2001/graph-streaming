@@ -171,6 +171,33 @@ python evaluation.py `
   --comparison-output artifacts/comparison.json
 ```
 
+### Cohort tối thiểu chỉ đủ demo UC1 + UC2 (máy yếu / 8GB RAM)
+
+Cohort mặc định (70 insider thật + control) tạo ra một graph quá lớn cho Memgraph chạy trên
+máy 8GB, dù bước Python đọc stream đã bounded memory. Nếu chỉ cần demo đúng 2 motif, dùng
+`--insider-ids` để giới hạn `1_prepare_cert_data.py` xuống 1 insider đại diện cho mỗi use case
+thay vì toàn bộ 70 insider:
+
+```bash
+python 1_prepare_cert_data.py \
+  --insider-ids AAM0658,BBS0039 \
+  --controls-per-insider 1 \
+  --output artifacts/demo_stream.jsonl \
+  --manifest artifacts/demo_cohort.json
+
+python 2_stream_cert.py --stream artifacts/demo_stream.jsonl --reset --replay-run-size 5000
+```
+
+- `AAM0658` (scenario 1): chắc chắn bắn alert UC1 exfiltration motif (leak domain sau USB burst).
+- `BBS0039` (scenario 3): chắc chắn bắn alert UC2 credential pivot motif. Vì UC2 cần cả danh
+  tính "nạn nhân" bị pivot tới, `1_prepare_cert_data.py` tự động đọc file ground-truth chi tiết
+  của incident (`answers/r4.2-<scenario>/<details_file>`) và thêm mọi user_id xuất hiện trong đó
+  vào cohort (ví dụ `FAW0032` cho BBS0039) — không cần khai báo tay.
+- Cohort này chỉ còn ~5 user thay vì 210, nên tổng số node/cạnh trong Memgraph nhỏ hơn hàng
+  chục lần so với cohort đầy đủ.
+- Muốn thêm ví dụ UC1 khác (intent + USB spike thay vì leak domain), dùng `VSS0154` (scenario 2)
+  thay cho/thêm vào `AAM0658`.
+
 ## Temporal graph schema
 
 Node chính:
@@ -312,6 +339,31 @@ Thiết kế hiện tại dành cho máy 8GB RAM / 8 vCPU:
 - Chỉ dựng evaluation cohort gồm 70 insider thật + control thật được match.
 - Docker Compose cap Memgraph container ở 6GB để chừa RAM cho Python và OS.
 - Replay có pruning mặc định 90 ngày cho event cũ.
+
+### Bắt buộc: `vm.max_map_count` trên host Linux
+
+Memgraph log cảnh báo này mỗi lần khởi động nhưng rất dễ bị bỏ qua:
+
+```text
+Max virtual memory areas vm.max_map_count 65530 is too low, increase to at least 262144
+```
+
+`vm.max_map_count` mặc định trên Ubuntu (65530) quá thấp cho allocator dựa trên mmap của
+Memgraph. Khi bị chặn ở mức này, container có thể báo "Memory limit exceeded" / bị OOM-killed
+**gần như ngay khi khởi động, kể cả khi graph gần như rỗng** — dễ nhầm là do dữ liệu/query quá
+nặng trong khi nguyên nhân thật là setting hệ điều hành. Sửa một lần trên host (cần `sudo`):
+
+```bash
+# Áp dụng ngay (mất khi reboot)
+sudo sysctl -w vm.max_map_count=262144
+
+# Áp dụng vĩnh viễn
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-memgraph.conf
+sudo sysctl --system
+
+# Restart lại container để nhận setting mới
+docker compose restart memgraph-platform
+```
 
 Nếu vẫn OOM ở bước replay trên máy yếu, giảm dần theo thứ tự sau:
 

@@ -264,7 +264,7 @@ class GraphRepositoryTest(unittest.TestCase):
         self.assertIn("owner_confidence", uc2.query)
         self.assertIn("user_machine_probability", uc2.query)
         self.assertIn("attacker.id <> u.id", uc2.query)
-        self.assertIn("stage_event.event_ts >= $window_start_ts", uc2.query)
+        self.assertIn("candidate_event.event_ts >= $window_start_ts", uc2.query)
         self.assertIn("emailed.first_seen < $trigger_ts", uc2.query)
         self.assertIn("recipients: stage_event.recipients", uc2.query)
 

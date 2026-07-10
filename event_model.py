@@ -282,8 +282,19 @@ def _write_sorted_event_runs(stream_path: Path, temp_dir: Path, run_size: int) -
     return run_paths, late_events, recomputes
 
 
+# Số file tạm được mở cùng lúc khi k-way merge. Giữ thấp hơn nhiều so với giới hạn
+# file descriptor mặc định của OS (thường 1024), vì với dataset lớn + run_size nhỏ,
+# số lô sort ở bước 1 có thể lên tới hàng nghìn.
+_MAX_MERGE_FANIN = 200
+
+
 def _merge_sorted_event_runs(run_paths: list[Path], temp_dir: str) -> Iterator[Event]:
     try:
+        merge_pass = 0
+        while len(run_paths) > _MAX_MERGE_FANIN:
+            run_paths = _reduce_event_runs(run_paths, Path(temp_dir), merge_pass)
+            merge_pass += 1
+
         with ExitStack() as stack:
             iterators = [
                 _jsonl_record_iterator(stack.enter_context(run_path.open("r", encoding="utf-8")))
@@ -293,6 +304,31 @@ def _merge_sorted_event_runs(run_paths: list[Path], temp_dir: str) -> Iterator[E
                 yield Event.from_record(record)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _reduce_event_runs(run_paths: list[Path], temp_dir: Path, merge_pass: int) -> list[Path]:
+    """Gộp run_paths theo nhóm tối đa _MAX_MERGE_FANIN file, ghi ra ít run lớn hơn để
+    giảm số file cần mở đồng thời ở lượt merge kế tiếp; xoá run cũ ngay sau khi dùng xong."""
+    reduced_paths: list[Path] = []
+    for batch_index, batch in enumerate(_chunked(run_paths, _MAX_MERGE_FANIN)):
+        reduced_path = temp_dir / f"reduced-{merge_pass:03d}-{batch_index:06d}.jsonl"
+        with ExitStack() as stack, reduced_path.open("w", encoding="utf-8") as output_handle:
+            iterators = [
+                _jsonl_record_iterator(stack.enter_context(run_path.open("r", encoding="utf-8")))
+                for run_path in batch
+            ]
+            for record in heapq.merge(*iterators, key=lambda record: (record["event_ts"], record["event_id"])):
+                output_handle.write(json.dumps(record, separators=(",", ":")))
+                output_handle.write("\n")
+        for run_path in batch:
+            run_path.unlink(missing_ok=True)
+        reduced_paths.append(reduced_path)
+    return reduced_paths
+
+
+def _chunked(items: list[Path], size: int) -> Iterator[list[Path]]:
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
 
 
 def _jsonl_record_iterator(handle):
