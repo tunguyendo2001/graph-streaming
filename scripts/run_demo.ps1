@@ -2,6 +2,7 @@ param(
   [int]$ControlsPerInsider = 1,
   [int]$RunSize = 10000,
   [int]$Limit = 5000,
+  [int]$CalibrationDays = 0,
   [string]$Python = "",
   [string]$MemgraphUri = "bolt://localhost:7687",
   [string]$CertRoot = ""
@@ -54,6 +55,7 @@ Write-Host "[DEMO] Replaying first $Limit events into Memgraph..."
   --reset `
   --delay 0 `
   --limit $Limit `
+  --calibration-days $CalibrationDays `
   --summary "artifacts/replay_summary.json"
 
 Write-Host "[DEMO] Evaluating graph alerts vs flat rule baseline..."

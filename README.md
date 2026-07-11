@@ -75,7 +75,12 @@ chmod +x scripts/run_demo.sh
 ./scripts/run_demo.sh
 ```
 
-Script này dùng 1 control / insider, trích stream nhỏ hơn, replay 5.000 event đầu và ghi:
+Script này dùng 1 control / insider, trích stream nhỏ hơn, replay 5.000 event đầu, calibration
+window mặc định 0 ngày (fallback threshold `0.75` áp dụng ngay) vì stream bounded bởi `--limit`
+chỉ trải vài ngày dữ liệu — dùng calibration mặc định 30 ngày như full run sẽ khiến mọi event
+nằm trong calibration window và không bao giờ bắn alert. Muốn calibration dài hơn (đổi lại có
+thể mất alert do thiếu candidate), truyền `--calibration-days N` (`-CalibrationDays N` trên
+PowerShell). Script ghi:
 
 - `artifacts/evaluation_stream.jsonl`
 - `artifacts/cohort.json`
@@ -296,6 +301,11 @@ python 2_stream_cert.py --calibration-days 30
 $env:UC1_FALLBACK_THRESHOLD="0.75"
 $env:UC2_FALLBACK_THRESHOLD="0.75"
 ```
+
+`scripts/run_demo.sh`/`run_demo.ps1` override default này xuống `--calibration-days 0` (xem
+[Chạy nhanh demo](#chạy-nhanh-demo)): stream demo bị `--limit` cắt ngắn nên không đủ vài chục
+ngày để lấp calibration window 30 ngày mặc định, và nếu không override thì demo chạy xong mà
+không có alert nào.
 
 Replay summary ghi `thresholds`, `processed_events`, `alerts_persisted`, `throughput_events_per_second`, `peak_python_rss_mb`, `late_events`, `recomputed_neighborhoods`.
 

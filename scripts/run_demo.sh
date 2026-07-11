@@ -4,6 +4,7 @@ set -euo pipefail
 controls_per_insider=1
 run_size=10000
 limit=5000
+calibration_days=0
 python_bin="${PYTHON:-python}"
 memgraph_uri="bolt://localhost:7687"
 cert_root=""
@@ -16,6 +17,7 @@ Options:
   --controls-per-insider N   Number of matched controls per insider (default: 1)
   --run-size N               External-sort run size for stream extraction (default: 10000)
   --limit N                  Number of replayed events for quick demo (default: 5000)
+  --calibration-days N       Calibration window before alerts fire (default: 0 = fallback threshold immediately; the CERT stream's --limit-bounded window is only a few days, so the usual 30-day calibration default would keep every event in calibration and no alert would ever fire)
   --python PATH              Python executable (default: $PYTHON or python)
   --memgraph-uri URI         Memgraph Bolt URI (default: bolt://localhost:7687)
   --cert-root PATH           CERT r4.2 root containing r4.2/ and answers/
@@ -35,6 +37,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --limit)
       limit="$2"
+      shift 2
+      ;;
+    --calibration-days)
+      calibration_days="$2"
       shift 2
       ;;
     --python)
@@ -103,6 +109,7 @@ echo "[DEMO] Replaying first $limit events into Memgraph..."
   --reset \
   --delay 0 \
   --limit "$limit" \
+  --calibration-days "$calibration_days" \
   --summary artifacts/replay_summary.json
 
 echo "[DEMO] Evaluating graph alerts vs flat rule baseline..."

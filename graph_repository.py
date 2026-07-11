@@ -366,7 +366,11 @@ CALL {
           candidate_event IS NOT NULL
           AND attacker IS NOT NULL
           AND attacker.id <> u.id
-          AND (candidate_machine.id = $machine_id OR candidate_event.keylogger_signal = true)
+          AND (
+            candidate_machine.id = $machine_id
+            OR candidate_event.keylogger_signal = true
+            OR candidate_event.kind IN ["DEVICE_CONNECT", "FILE_COPY"]
+          )
        ) AS is_valid_candidate
   WITH u,
        CASE WHEN is_valid_candidate THEN attacker ELSE NULL END AS attacker,
@@ -401,7 +405,19 @@ CALL {
          reduce(acc = [], event IN stage_events | CASE WHEN event.user_id <> u.id THEN acc + [event.user_id] ELSE acc END) AS attacker_ids
 }
 
-WITH u, trigger_machine, history_events, recipient_history, victim_machine_count, victim_machine_first_seen, victim_machine_last_seen, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids,
+CALL {
+  WITH trigger_machine, attacker_ids
+  OPTIONAL MATCH (attacker_owner:User {id: CASE WHEN size(attacker_ids) = 0 THEN NULL ELSE attacker_ids[0] END})-[attacker_used:USED_MACHINE]->(trigger_machine)
+  RETURN coalesce(attacker_used.count, 0) AS attacker_machine_count
+}
+
+CALL {
+  WITH attacker_ids
+  OPTIONAL MATCH (attacker_owner:User {id: CASE WHEN size(attacker_ids) = 0 THEN NULL ELSE attacker_ids[0] END})-[attacker_used_all:USED_MACHINE]->(:Machine)
+  RETURN sum(coalesce(attacker_used_all.count, 0)) AS attacker_total_machine_count
+}
+
+WITH u, trigger_machine, history_events, recipient_history, victim_machine_count, victim_machine_first_seen, victim_machine_last_seen, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids, attacker_machine_count, attacker_total_machine_count,
      CASE WHEN size(machine_owners) > 0 THEN machine_owners[0] ELSE NULL END AS primary_machine_owner
 RETURN {
     user_id: u.id,
@@ -413,8 +429,12 @@ RETURN {
         ELSE toFloat(primary_machine_owner.count) / machine_total_count
     END,
     user_machine_probability: CASE
-        WHEN victim_total_machine_count IS NULL OR victim_total_machine_count = 0 THEN 0.0
-        ELSE toFloat(victim_machine_count) / victim_total_machine_count
+        WHEN size(attacker_ids) = 0 THEN CASE
+            WHEN victim_total_machine_count IS NULL OR victim_total_machine_count = 0 THEN 0.0
+            ELSE toFloat(victim_machine_count) / victim_total_machine_count
+        END
+        WHEN attacker_total_machine_count IS NULL OR attacker_total_machine_count = 0 THEN 0.0
+        ELSE toFloat(attacker_machine_count) / attacker_total_machine_count
     END,
     history_start_ts: $history_start_ts,
     window_start_ts: $window_start_ts,
@@ -593,11 +613,12 @@ class GraphRepository:
             "trigger_ts": trigger_ts,
             "history_start_ts": trigger_ts - 90 * 24 * 60 * 60,
             "window_start_ts": trigger_ts - 48 * 60 * 60,
-            # Chặn OPTIONAL MATCH (attacker)-[:ACTED]->(stage_event) phình vô hạn: điều kiện
-            # lọc "kind IN [HTTP, DEVICE_CONNECT, FILE_COPY, LOGON]" gần như khớp mọi event
-            # phổ biến của MỌI user khác trong cửa sổ 48h, nên với cohort có volume HTTP lớn
-            # (vd hàng chục nghìn event/ngày) mỗi lần trigger sẽ collect hàng nghìn record đầy
-            # field, đủ để Memgraph OOM dù cohort chỉ vài user. Giữ N event gần nhất theo
+            # Chặn OPTIONAL MATCH (attacker)-[:ACTED]->(stage_event) phình vô hạn: HTTP event
+            # volume rất lớn (hàng chục nghìn/ngày) nên chỉ nhận HTTP/LOGON của user khác khi
+            # nó nằm trên target_machine hoặc có keylogger_signal. DEVICE_CONNECT/FILE_COPY thì
+            # nhận trên MỌI máy vì hai loại này hiếm (không đủ để gây OOM) và là bằng chứng "s"/"f"
+            # (USB + file keylogger) trên máy nguồn của attacker — thứ mà UC2Detector cần thấy để
+            # tính K, chứ không chỉ hoạt động trên target_machine. Giữ N event gần nhất theo
             # event_ts là đủ cho tín hiệu continuity/order mà UC2Detector cần.
             "max_stage_events": int(os.getenv("UC2_MAX_STAGE_EVENTS", "500")),
         }
