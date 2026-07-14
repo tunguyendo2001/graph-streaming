@@ -13,6 +13,7 @@ from baselines import (
     temporal_order,
     time_decay,
     usb_deviation,
+    usb_rarity,
     weighted_coverage,
 )
 
@@ -78,6 +79,12 @@ class BaselineFormulaTest(unittest.TestCase):
             usb_deviation(6, history, seen_before=True),
             expected,
         )
+
+    def test_usb_rarity_decays_with_prior_usb_days(self):
+        self.assertEqual(usb_rarity(0), 1.0)
+        self.assertAlmostEqual(usb_rarity(1), 0.7071067811865475)
+        self.assertAlmostEqual(usb_rarity(3), 0.5)
+        self.assertLess(usb_rarity(30), 0.2)
 
     def test_domain_novelty_decays_with_prior_visits(self):
         self.assertEqual(domain_novelty(0), 1.0)

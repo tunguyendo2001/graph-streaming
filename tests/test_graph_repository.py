@@ -90,7 +90,9 @@ class GraphRepositorySchemaTest(unittest.TestCase):
                 "CREATE INDEX ON :Domain(name);",
                 "CREATE INDEX ON :EmailAddress(address);",
                 "CREATE INDEX ON :ActivityWindow(id);",
+                "CREATE INDEX ON :ActivityWindow(user_id);",
                 "CREATE INDEX ON :UsbSession(id);",
+                "CREATE INDEX ON :UsbSession(user_id);",
                 "CREATE INDEX ON :Alert(id);",
                 "CREATE INDEX ON :Alert(detector);",
             ],
@@ -263,8 +265,8 @@ class GraphRepositoryTest(unittest.TestCase):
         self.assertIn("attacker_user_id", uc2.query)
         self.assertIn("owner_confidence", uc2.query)
         self.assertIn("user_machine_probability", uc2.query)
-        self.assertIn("attacker.id <> u.id", uc2.query)
-        self.assertIn("candidate_event.event_ts >= $window_start_ts", uc2.query)
+        self.assertIn("stage_event.user_id <> u.id", uc2.query)
+        self.assertIn("stage_event.event_ts >= $window_start_ts", uc2.query)
         self.assertIn("emailed.first_seen < $trigger_ts", uc2.query)
         self.assertIn("recipients: stage_event.recipients", uc2.query)
 

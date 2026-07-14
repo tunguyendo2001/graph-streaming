@@ -16,6 +16,7 @@ from baselines import (
     temporal_order,
     time_decay,
     usb_deviation,
+    usb_rarity,
     weighted_coverage,
 )
 from event_model import Event
@@ -334,12 +335,16 @@ def _usb_component(
         for event in candidate_events
         if event.get("kind") == "DEVICE_CONNECT" and _day(event["event_ts"]) == current_day
     )
-    daily_history = list(_daily_counts(history_events, {"DEVICE_CONNECT"}).values())
+    usb_days = _daily_counts(history_events, {"DEVICE_CONNECT"})
+    daily_history = list(usb_days.values())
     seen_before = any(
         event.get("kind") == "DEVICE_CONNECT" and event.get("machine_id") == trigger_machine_id
         for event in history_events
     )
-    return usb_deviation(current_daily_count, daily_history, seen_before=seen_before)
+    deviation = usb_deviation(current_daily_count, daily_history, seen_before=seen_before)
+    # Người gần như không dùng USB: mỗi lần cắm đều bất thường, kể cả khi số lần/ngày
+    # bằng median lịch sử (median của [1, 1] vẫn là 1 -> robust_deviation = 0).
+    return max(deviation, usb_rarity(len(usb_days)))
 
 
 def _file_copy_component(

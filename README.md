@@ -62,6 +62,21 @@ Memgraph Lab chạy ở `http://localhost:3000`, Bolt URI mặc định là `bol
 
 Khởi tạo schema bằng cách chạy nội dung `init_schema.cypher` trong Memgraph Lab.
 
+## Demo tối giản (chắc chắn có alert cho cả 2 use case)
+
+```bash
+./scripts/run_demo_min.sh
+```
+
+Chỉ replay 2 insider thật, không control: `AAM0658` (scenario 1 → UC1 exfil motif) và `BBS0039`
+(scenario 3 → UC2 credential pivot, kèm nạn nhân `FAW0032`), mỗi người chỉ lấy vài tuần lịch sử
+quanh incident (~6.000 event, ~30 phút). Calibration để `14` ngày vì stream ngắn: mặc định 30 ngày
+sẽ nuốt trọn stream UC2 (bắt đầu 2010-07-22, incident 2010-08-12) và không alert nào bắn.
+
+Kết quả mong đợi: alert `uc1_exfiltration_motif` cho AAM0658 (logon đêm → USB → file copy → domain
+lạ) và `uc2_credential_pivot_motif` cho FAW0032/BBS0039 (HTTP keylogger → USB → copy .exe → logon
+máy nạn nhân → mass email 2010-08-13 19:01).
+
 ## Chạy nhanh demo
 
 ```powershell

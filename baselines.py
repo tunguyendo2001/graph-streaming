@@ -38,6 +38,11 @@ def usb_deviation(current_daily_count: int, daily_history: Sequence[int], *, see
     return max(new_usb, robust_deviation(current_daily_count, daily_history))
 
 
+def usb_rarity(prior_usb_days: int) -> float:
+    """Điểm hiếm gặp của việc cắm USB: user gần như không dùng USB -> gần 1.0."""
+    return 1.0 / math.sqrt(1.0 + max(0, prior_usb_days))
+
+
 def domain_novelty(prior_visits: int) -> float:
     return 1.0 / math.sqrt(1.0 + max(0, prior_visits))
 

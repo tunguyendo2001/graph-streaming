@@ -218,10 +218,9 @@ MATCH (u:User {id: $user_id})
 
 CALL {
   WITH u
-  MATCH (history_event:Event)
+  MATCH (u)-[:ACTED]->(history_event:Event)
   WHERE history_event.event_ts >= $history_start_ts
     AND history_event.event_ts < $trigger_ts
-    AND history_event.user_id = u.id
   WITH collect({
       event_id: history_event.id,
       source: history_event.source,
@@ -248,10 +247,9 @@ CALL {
 
 CALL {
   WITH u
-  MATCH (candidate_event:Event)
+  MATCH (u)-[:ACTED]->(candidate_event:Event)
   WHERE candidate_event.event_ts >= $motif_start_ts
     AND candidate_event.event_ts <= $trigger_ts
-    AND candidate_event.user_id = u.id
   WITH collect({
       event_id: candidate_event.id,
       source: candidate_event.source,
@@ -293,10 +291,9 @@ WITH u, trigger_machine
 
 CALL {
   WITH u
-  MATCH (history_event:Event)
+  MATCH (u)-[:ACTED]->(history_event:Event)
   WHERE history_event.event_ts >= $history_start_ts
     AND history_event.event_ts < $trigger_ts
-    AND history_event.user_id = u.id
   WITH collect({
       event_id: history_event.id,
       source: history_event.source,
@@ -352,39 +349,28 @@ CALL {
 }
 
 CALL {
-  WITH u, trigger_machine
-  MATCH (candidate_event:Event)
-  WHERE candidate_event.event_ts >= $window_start_ts
-    AND candidate_event.event_ts <= $trigger_ts
-  WITH u, trigger_machine, collect(candidate_event) AS window_events
-  UNWIND (CASE WHEN size(window_events) = 0 THEN [NULL] ELSE window_events END) AS candidate_event
-  WITH u, trigger_machine, candidate_event
-  OPTIONAL MATCH (attacker:User)-[:ACTED]->(candidate_event)
-  OPTIONAL MATCH (candidate_event)-[:ON_MACHINE]->(candidate_machine:Machine)
-  WITH u, attacker, candidate_event, candidate_machine,
-       (
-          candidate_event IS NOT NULL
-          AND attacker IS NOT NULL
-          AND attacker.id <> u.id
-          AND (
-            candidate_machine.id = $machine_id
-            OR candidate_event.keylogger_signal = true
-            OR candidate_event.kind IN ["DEVICE_CONNECT", "FILE_COPY"]
-          )
-       ) AS is_valid_candidate
-  WITH u,
-       CASE WHEN is_valid_candidate THEN attacker ELSE NULL END AS attacker,
-       CASE WHEN is_valid_candidate THEN candidate_event ELSE NULL END AS stage_event,
-       CASE WHEN is_valid_candidate THEN candidate_machine ELSE NULL END AS stage_machine
-  ORDER BY (stage_event IS NULL), stage_event.event_ts DESC
+  WITH u
+  MATCH (stage_event:Event)
+  WHERE stage_event.event_ts >= $window_start_ts
+    AND stage_event.event_ts <= $trigger_ts
+    AND stage_event.user_id <> u.id
+    AND (
+      stage_event.machine_id = $machine_id
+      OR stage_event.keylogger_signal = true
+      OR stage_event.kind IN ["DEVICE_CONNECT", "FILE_COPY"]
+    )
+  WITH stage_event
+  ORDER BY stage_event.event_ts DESC
   LIMIT $max_stage_events
-  WITH u, collect(CASE WHEN stage_event IS NULL THEN NULL ELSE {
+  WITH stage_event
+  ORDER BY stage_event.event_ts ASC
+  WITH collect({
       event_id: stage_event.id,
       source: stage_event.source,
       kind: stage_event.kind,
-      user_id: attacker.id,
+      user_id: stage_event.user_id,
       event_ts: stage_event.event_ts,
-      machine_id: stage_machine.id,
+      machine_id: stage_event.machine_id,
       activity: stage_event.activity,
       filename: stage_event.filename,
       extension: stage_event.extension,
@@ -399,10 +385,9 @@ CALL {
       recipients: stage_event.recipients,
       size: stage_event.size,
       attachments: stage_event.attachments
-  } END) AS raw_stage_events
-  WITH u, reduce(acc = [], event IN raw_stage_events | CASE WHEN event IS NOT NULL THEN acc + [event] ELSE acc END) AS stage_events
+  }) AS stage_events
   RETURN stage_events,
-         reduce(acc = [], event IN stage_events | CASE WHEN event.user_id <> u.id THEN acc + [event.user_id] ELSE acc END) AS attacker_ids
+         reduce(acc = [], event IN stage_events | acc + [event.user_id]) AS attacker_ids
 }
 
 CALL {

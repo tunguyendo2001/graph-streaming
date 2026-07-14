@@ -5,6 +5,8 @@ CREATE INDEX ON :Event(event_ts);
 CREATE INDEX ON :Domain(name);
 CREATE INDEX ON :EmailAddress(address);
 CREATE INDEX ON :ActivityWindow(id);
+CREATE INDEX ON :ActivityWindow(user_id);
 CREATE INDEX ON :UsbSession(id);
+CREATE INDEX ON :UsbSession(user_id);
 CREATE INDEX ON :Alert(id);
 CREATE INDEX ON :Alert(detector);
