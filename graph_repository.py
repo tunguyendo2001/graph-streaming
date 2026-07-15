@@ -216,6 +216,9 @@ DETACH DELETE e
 _UC1_CONTEXT_QUERY = """
 MATCH (u:User {id: $user_id})
 
+// UC1Detector chỉ đọc kind/event_ts/machine_id/domain của history (giờ logon, số USB và
+// FILE_COPY theo ngày, số lần đã thăm domain). Trả đủ 19 property cho vài nghìn event
+// lịch sử mỗi trigger là phần đắt nhất của replay -> chỉ ship đúng field cần.
 CALL {
   WITH u
   MATCH (u)-[:ACTED]->(history_event:Event)
@@ -223,24 +226,10 @@ CALL {
     AND history_event.event_ts < $trigger_ts
   WITH collect({
       event_id: history_event.id,
-      source: history_event.source,
       kind: history_event.kind,
-      user_id: history_event.user_id,
       event_ts: history_event.event_ts,
       machine_id: history_event.machine_id,
-      activity: history_event.activity,
-      filename: history_event.filename,
-      extension: history_event.extension,
-      domain: history_event.domain,
-      url: history_event.url,
-      keylogger_signal: history_event.keylogger_signal,
-      job_signal: history_event.job_signal,
-      leak_signal: history_event.leak_signal,
-      cloud_signal: history_event.cloud_signal,
-      recipient_count: history_event.recipient_count,
-      recipients: history_event.recipients,
-      size: history_event.size,
-      attachments: history_event.attachments
+      domain: history_event.domain
   }) AS history_events
   RETURN history_events
 }
@@ -289,33 +278,19 @@ MATCH (u:User {id: $user_id})
 OPTIONAL MATCH (trigger_machine:Machine {id: $machine_id})
 WITH u, trigger_machine
 
+// UC2Detector không đọc history_events; nó chỉ cần fan-out lịch sử của EMAIL
+// (per_email_history + window_fanout_history).
 CALL {
   WITH u
   MATCH (u)-[:ACTED]->(history_event:Event)
   WHERE history_event.event_ts >= $history_start_ts
     AND history_event.event_ts < $trigger_ts
+    AND history_event.kind = "EMAIL"
   WITH collect({
-      event_id: history_event.id,
-      source: history_event.source,
-      kind: history_event.kind,
-      user_id: history_event.user_id,
       event_ts: history_event.event_ts,
-      machine_id: history_event.machine_id,
-      activity: history_event.activity,
-      filename: history_event.filename,
-      extension: history_event.extension,
-      domain: history_event.domain,
-      url: history_event.url,
-      keylogger_signal: history_event.keylogger_signal,
-      job_signal: history_event.job_signal,
-      leak_signal: history_event.leak_signal,
-      cloud_signal: history_event.cloud_signal,
-      recipient_count: history_event.recipient_count,
-      recipients: history_event.recipients,
-      size: history_event.size,
-      attachments: history_event.attachments
-  }) AS history_events
-  RETURN history_events
+      recipient_count: coalesce(history_event.recipient_count, 0)
+  }) AS email_history
+  RETURN email_history
 }
 
 CALL {
@@ -402,7 +377,7 @@ CALL {
   RETURN sum(coalesce(attacker_used_all.count, 0)) AS attacker_total_machine_count
 }
 
-WITH u, trigger_machine, history_events, recipient_history, victim_machine_count, victim_machine_first_seen, victim_machine_last_seen, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids, attacker_machine_count, attacker_total_machine_count,
+WITH u, trigger_machine, email_history, recipient_history, victim_machine_count, victim_machine_first_seen, victim_machine_last_seen, victim_total_machine_count, machine_owners, machine_total_count, stage_events, attacker_ids, attacker_machine_count, attacker_total_machine_count,
      CASE WHEN size(machine_owners) > 0 THEN machine_owners[0] ELSE NULL END AS primary_machine_owner
 RETURN {
     user_id: u.id,
@@ -424,11 +399,10 @@ RETURN {
     history_start_ts: $history_start_ts,
     window_start_ts: $window_start_ts,
     trigger_ts: $trigger_ts,
-    history_events: history_events,
     stage_events: stage_events,
     window_events: stage_events,
-    per_email_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
-    window_fanout_history: reduce(acc = [], event IN history_events | CASE WHEN event.kind = 'EMAIL' AND event.event_ts >= $trigger_ts - 600 THEN acc + [coalesce(event.recipient_count, 0)] ELSE acc END),
+    per_email_history: reduce(acc = [], event IN email_history | acc + [event.recipient_count]),
+    window_fanout_history: reduce(acc = [], event IN email_history | CASE WHEN event.event_ts >= $trigger_ts - 600 THEN acc + [event.recipient_count] ELSE acc END),
     recipient_history: recipient_history,
     machine_use: {
         count: victim_machine_count,
