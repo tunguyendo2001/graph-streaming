@@ -19,8 +19,7 @@ WITH u, collect(CASE WHEN history IS NULL THEN NULL ELSE {
   leak_signal: history.leak_signal,
   cloud_signal: history.cloud_signal,
   job_signal: history.job_signal
-} END) AS raw_history_events
-WITH u, [event IN raw_history_events WHERE event IS NOT NULL] AS history_events
+} END) AS history_events
 OPTIONAL MATCH (u)-[:ACTED]->(candidate:Event)-[:ON_MACHINE]->(candidate_machine:Machine)
 WHERE candidate.event_ts >= $motif_start_ts
   AND candidate.event_ts <= $trigger_ts
@@ -40,10 +39,10 @@ WITH u, history_events, collect(CASE WHEN candidate IS NULL THEN NULL ELSE {
   cloud_signal: candidate.cloud_signal,
   job_signal: candidate.job_signal,
   usb_session_id: usb_session.id
-} END) AS raw_candidate_events
+} END) AS candidate_events
 WITH u,
      history_events,
-     [event IN raw_candidate_events WHERE event IS NOT NULL] AS candidate_events
+     candidate_events
 RETURN {
   user_id: u.id,
   history_start_ts: $history_start_ts,

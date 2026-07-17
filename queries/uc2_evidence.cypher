@@ -58,14 +58,7 @@ WITH victim,
        download_signal: stage.download_signal,
        recipients: stage.recipients,
        recipient_count: stage.recipient_count
-     } END) AS raw_stage_events
-WITH victim,
-     target_machine,
-     victim_machine_count,
-     victim_total_machine_count,
-     dominant_owner,
-     attacker,
-     [event IN raw_stage_events WHERE event IS NOT NULL] AS stage_events
+     } END) AS stage_events
 OPTIONAL MATCH (victim)-[emailed:EMAILED]->(recipient:EmailAddress)
 WHERE emailed.first_seen < $trigger_ts
 WITH victim,
