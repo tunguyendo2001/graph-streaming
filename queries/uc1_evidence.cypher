@@ -19,13 +19,20 @@ WITH u, collect(CASE WHEN history IS NULL THEN NULL ELSE {
   leak_signal: history.leak_signal,
   cloud_signal: history.cloud_signal,
   job_signal: history.job_signal
-} END) AS history_events
+} END) AS history_events,
+     collect(CASE WHEN history.kind = 'LOGON' THEN history.event_ts END) AS logon_hours,
+     collect(CASE WHEN history.kind = 'DEVICE_CONNECT' THEN history.event_ts END) AS historical_daily_usb_events,
+     collect(CASE WHEN history.kind = 'FILE_COPY' THEN history.event_ts END) AS historical_file_copy_events,
+     collect(CASE WHEN history.domain IS NOT NULL THEN history.domain END) AS historical_domains
 OPTIONAL MATCH (u)-[:ACTED]->(candidate:Event)-[:ON_MACHINE]->(candidate_machine:Machine)
 WHERE candidate.event_ts >= $motif_start_ts
   AND candidate.event_ts <= $trigger_ts
 OPTIONAL MATCH (candidate)-[:IN_USB_SESSION|BOUNDARY_OF]->(usb_session:UsbSession)
 OPTIONAL MATCH (candidate)-[:VISITED]->(domain:Domain)
-WITH u, history_events, collect(CASE WHEN candidate IS NULL THEN NULL ELSE {
+WITH u, history_events, logon_hours, historical_daily_usb_events,
+     historical_file_copy_events, historical_domains,
+     collect(usb_session.id) AS active_usb_session_ids,
+     collect(CASE WHEN candidate IS NULL THEN NULL ELSE {
   event_id: candidate.id,
   source: candidate.source,
   kind: candidate.kind,
@@ -40,9 +47,6 @@ WITH u, history_events, collect(CASE WHEN candidate IS NULL THEN NULL ELSE {
   job_signal: candidate.job_signal,
   usb_session_id: usb_session.id
 } END) AS candidate_events
-WITH u,
-     history_events,
-     candidate_events
 RETURN {
   user_id: u.id,
   history_start_ts: $history_start_ts,
@@ -50,9 +54,9 @@ RETURN {
   trigger_ts: $trigger_ts,
   history_events: history_events,
   candidate_events: candidate_events,
-  active_usb_session_ids: [event IN candidate_events WHERE event.usb_session_id IS NOT NULL | event.usb_session_id],
-  logon_hours: [event IN history_events WHERE event.kind = 'LOGON' | event.event_ts],
-  historical_daily_usb_events: [event IN history_events WHERE event.kind = 'DEVICE_CONNECT' | event.event_ts],
-  historical_file_copy_events: [event IN history_events WHERE event.kind = 'FILE_COPY' | event.event_ts],
-  historical_domains: [event IN history_events WHERE event.domain IS NOT NULL | event.domain]
+  active_usb_session_ids: active_usb_session_ids,
+  logon_hours: logon_hours,
+  historical_daily_usb_events: historical_daily_usb_events,
+  historical_file_copy_events: historical_file_copy_events,
+  historical_domains: historical_domains
 } AS context;
