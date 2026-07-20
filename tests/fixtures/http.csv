@@ -1,0 +1,4 @@
+id,date,user,pc,url
+{H1},01/02/2010 07:50:00,INSIDER1,PC-1001,http://example.com/login
+{H2},01/03/2010 09:20:00,CONTROL1,PC-3002,https://dropbox.example.net/upload
+{H3},01/04/2010 10:20:00,CONTROL2,PC-4001,http://jobs.example.org/search

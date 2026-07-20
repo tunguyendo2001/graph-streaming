@@ -3,6 +3,9 @@ venv/
 __pycache__/
 *.py[cod]
 .worktrees/
+artifacts/
+dead-letter/
+*.jsonl
 
 # Dataset gốc CERT khá lớn; giữ local để chạy assignment, tránh commit nhầm.
 data/

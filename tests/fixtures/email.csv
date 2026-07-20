@@ -1,0 +1,8 @@
+id,date,user,pc,to,cc,bcc,from,size,attachments,content
+{E1},01/02/2010 07:45:00,INSIDER1,PC-1001,one@example.com,,,inside1@example.com,100,0,hello
+{E2},01/04/2010 08:30:00,INSIDER2,PC-2002,two@example.com,,,inside2@example.com,120,0,hello
+{E3},01/04/2010 08:31:00,INSIDER2,PC-2002,three@example.com,,,inside2@example.com,140,1,hello
+{E4},01/03/2010 09:30:00,CONTROL1,PC-3002,four@example.com,,,control1@example.com,160,0,hello
+{E5},01/04/2010 10:10:00,CONTROL2,PC-4001,five@example.com,,,control2@example.com,180,0,hello
+{E6},01/05/2010 11:20:00,CONTROL3,PC-5002,six@example.com,,,control3@example.com,200,2,hello
+{E7},01/03/2010 18:20:00,CONTROL4,PC-6002,seven@example.com,,,control4@example.com,220,0,hello
